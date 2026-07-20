@@ -1,0 +1,51 @@
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Local editor/agent metadata
+.agents/
+.codex/
+.vscode/
+.idea/
+
+# Generated DO-FMBS runtime data and model artifacts
+do_fmbs_data/
+*.keras
+*.h5
+*.pkl
+*.npz
+
+# Generated charts/images from phase scripts
+do_fmbs_*results.png
+do_fmbs_*accuracy.png
+do_fmbs_*distribution.png
+do_fmbs_*faces.png
+do_fmbs_*fingerprints.png
+do_fmbs_validation_*.png
+
+# Generated presentation/document outputs
+DO_FMBS_Model_Design_and_Results_Slide*.pdf
+
+DO_FMBS_Detailed_Model_Design_and_Results_Presentation.*
+
+# Temporary/extracted presentation media
+extracted_pptx_media/
+downloads/
+
+# Nested/local git copy accidentally created in the workspace
+DO-FMBS/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
