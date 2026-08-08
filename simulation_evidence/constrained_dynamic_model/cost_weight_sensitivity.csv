@@ -1,0 +1,4 @@
+﻿profile,epsilon,AI,PA,weight_defense,weight_participation,weight_defense_switch,weight_participation_switch,DM,adversarial_fraction,training_attack_epsilon,gradient_noise_std,GS,participating_clients,predicted_Y,control_cost,status
+balanced,0.1,0.33333333333333337,0.3,0.6,0.4,0.15,0.1,0.8,0.4,0.04000000000000001,0.00023999999999999998,0.75,4,0.6005011266509831,0.6465000000000001,minimum_target_met
+defense_sparing,0.1,0.33333333333333337,0.3,1.0,0.2,0.15,0.1,0.65,0.325,0.0325,0.000195,1.0,5,0.601146500119886,0.6471250000000001,minimum_target_met
+participation_sparing,0.1,0.33333333333333337,0.3,0.3,0.8,0.15,0.1,1.0,0.5,0.05,0.0003,0.5,3,0.612925390124156,0.57975,minimum_target_met

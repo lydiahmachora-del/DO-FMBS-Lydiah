@@ -1,0 +1,160 @@
+{
+  "names": [
+    "B0",
+    "B_AI",
+    "B_PA",
+    "B_DM",
+    "B_GS"
+  ],
+  "coefficients": [
+    0.40073773394090906,
+    -0.1821447541506497,
+    -0.2273291106610513,
+    0.2613927388415178,
+    0.15941713718052228
+  ],
+  "standard_errors": [
+    0.002459560557522698,
+    0.002764209193489359,
+    0.005023315378954173,
+    0.0024914579854815556,
+    0.0026315269415111697
+  ],
+  "t_statistics": [
+    162.93062299898702,
+    -65.89398319767612,
+    -45.25479559047315,
+    104.91557167117756,
+    60.579709318490224
+  ],
+  "p_values": [
+    0.0,
+    3.9572126028988194e-301,
+    2.241150222275988e-209,
+    0.0,
+    1.6479483109139448e-279
+  ],
+  "ci_low": [
+    0.39590867412329317,
+    -0.1875719559745433,
+    -0.23719180356101893,
+    0.25650105215050767,
+    0.15425044145784217
+  ],
+  "ci_high": [
+    0.40556679375852495,
+    -0.17671755232675612,
+    -0.21746641776108366,
+    0.26628442553252796,
+    0.1645838329032024
+  ],
+  "standardized_coefficients": [
+    0.0,
+    -0.4466778766249901,
+    -0.30677028494103076,
+    0.7111948998194878,
+    0.4106538201487351
+  ],
+  "r_squared": 0.9680638787210141,
+  "adjusted_r_squared": 0.9678800737064588,
+  "rmse": 0.024527609852240742,
+  "mae": 0.01958051941874057,
+  "residual_mean": 4.229553215598766e-16,
+  "residual_std": 0.024545148367068313,
+  "shapiro_w": 0.9981115005116888,
+  "shapiro_p": 0.6422995458635382,
+  "durbin_watson": 1.8677588881161373,
+  "cross_validation_r2_mean": 0.9672544058905496,
+  "cross_validation_r2_std": 0.0015492287824988376,
+  "cross_validation_rmse_mean": 0.02471036984733036,
+  "vifs": {
+    "AI": 0.9999999999999996,
+    "PA": 0.9999999999999998,
+    "DM": 0.9999999999999998,
+    "GS": 1.0
+  },
+  "observations": 700,
+  "degrees_of_freedom": 695,
+  "condition_number": 7.248487236309215,
+  "estimator": "constrained least squares (SLSQP)",
+  "optimization_success": true,
+  "optimization_message": "Optimization terminated successfully",
+  "residual_sum_of_squares": 0.4211225515446159,
+  "maximum_constraint_violation": 0.0,
+  "unconstrained_coefficients": [
+    0.40073773394090906,
+    -0.1821447541506497,
+    -0.2273291106610513,
+    0.2613927388415178,
+    0.15941713718052228
+  ],
+  "maximum_constrained_ols_difference": 0.0,
+  "active_constraints": [],
+  "inference_basis": "Classical OLS covariance is reported because the constrained solution equals the unconstrained OLS solution and no fitted sign constraint is active.",
+  "equation": "Y_hat_(t+1) = B0 + B_AI*AI_t + B_PA*PA_t + B_DM*DM_t + B_GS*GS_t",
+  "constraints_satisfied": true,
+  "target_Y": 0.6,
+  "preferred_Y": 0.7,
+  "seed": 42,
+  "simulation_design": "7 AI x 5 PA x 4 DM x 5 GS = 700 balanced observations",
+  "simulation_ground_truth": {
+    "B0": 0.4,
+    "B_AI": -0.18,
+    "B_PA": -0.22,
+    "B_DM": 0.26,
+    "B_GS": 0.16
+  },
+  "maximum_coefficient_recovery_error": 0.007329110661051297,
+  "fitted_domains": {
+    "epsilon": [
+      0.0,
+      0.3
+    ],
+    "AI": [
+      0.0,
+      1.0
+    ],
+    "PA": [
+      0.0,
+      0.5
+    ],
+    "DM": [
+      0.0,
+      1.0
+    ],
+    "GS": [
+      0.0,
+      1.0
+    ],
+    "participating_clients": [
+      1,
+      5
+    ],
+    "Y": [
+      0.0,
+      1.0
+    ]
+  },
+  "optimization_settings": {
+    "minimum_participating_clients": 3,
+    "total_clients": 5,
+    "defense_grid_start": 0.0,
+    "defense_grid_stop": 1.0,
+    "defense_grid_step": 0.05,
+    "client_candidates": [
+      3,
+      4,
+      5
+    ],
+    "cost_weights": {
+      "defense": 0.6,
+      "participation": 0.4,
+      "defense_switch": 0.15,
+      "participation_switch": 0.1
+    },
+    "preferred_target_Y": 0.7,
+    "minimum_target_Y": 0.6
+  },
+  "dynamic_definition": "AI_t and PA_t are measured before each round; DM_t and GS_t are re-optimized; Y_(t+1) is predicted. The controller first seeks Y>=0.70, then Y>=0.60, requires at least three clients, and rejects infeasible or out-of-domain states.",
+  "scope_statement": "This is a reproducible synthetic constrained-coefficient recovery and adaptive-policy demonstration. Coefficients are simulation estimates, not neural-network weights or estimates from 700 independent federated training runs."
+}

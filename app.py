@@ -16,6 +16,7 @@ import base64
 import subprocess
 import sys
 import time
+import json
 from datetime import datetime
 
 # Set page configuration
@@ -132,7 +133,7 @@ FORMULAS = {
     "far": r"$$FAR = \frac{FP}{FP + TN}$$",
     "frr": r"$$FRR = \frac{FN}{TP + FN}$$",
     "privacy": r"$$Privacy\ Score = 1 - ASR = 1 - \frac{SAI}{TIA}$$",
-    "regression": r"$$Y_i = B_0 + B_{1i}x_1 + B_{2i}x_2 + B_{3i}x_3 + B_4x_4 + \epsilon$$",
+    "regression": r"$$\hat{Y}_{t+1} = B_0 + B_{AI}AI_t + B_{PA}PA_t + B_{DM}DM_t + B_{GS}GS_t$$",
     "fedavg": r"$$W_{global}^{(t+1)} = \sum_{k=1}^{K} \frac{n_k}{n} W_{local,k}^{(t)}$$",
     "fgsm": r"$$X_{adv} = X + \epsilon \cdot sign(\nabla_X J(\theta, X, y))$$",
     "dp_noise": r"$$\mathcal{M}(D) = f(D) + \mathcal{N}(0, \sigma^2 I)$$"
@@ -370,29 +371,49 @@ def load_fingerprint_images():
         pass
     return images
 
-def check_constraints(results):
-    """Check if the model satisfies the mathematical constraints"""
+DYNAMIC_RESULTS_DIR = os.path.join('simulation_evidence', 'constrained_dynamic_model')
+
+def load_dynamic_model_results():
+    """Load the complete set of fitted Phase 6 artifacts without fallbacks."""
+    artifact_names = {
+        'coefficients': 'coefficient_estimates.csv',
+        'constraints': 'constraint_checks.csv',
+        'ranges': 'acceptance_ranges.csv',
+        'schedule': 'dynamic_optimization_schedule.csv',
+        'stresses': 'stress_test_scenarios.csv',
+        'sensitivity': 'cost_weight_sensitivity.csv',
+    }
+    fit_path = os.path.join(DYNAMIC_RESULTS_DIR, 'model_fit.json')
+    artifact_paths = {
+        name: os.path.join(DYNAMIC_RESULTS_DIR, filename)
+        for name, filename in artifact_names.items()
+    }
+    if not os.path.exists(fit_path) or not all(os.path.exists(path) for path in artifact_paths.values()):
+        return None
+    with open(fit_path, 'r', encoding='utf-8') as stream:
+        fit = json.load(stream)
+    loaded = {'fit': fit}
+    loaded.update({name: pd.read_csv(path) for name, path in artifact_paths.items()})
+    return loaded
+
+def check_constraints(_results=None):
+    """Return constraint decisions computed from fitted Phase 6 coefficients."""
+    dynamic = load_dynamic_model_results()
+    if not dynamic:
+        return []
     constraints = []
-    
-    if results:
-        B1 = -abs(results.get('baseline', {}).get('attack_success_rate', 0.538))
-        B2 = -abs(results.get('baseline', {}).get('privacy_score', 0.462))
-        B3 = results.get('do_fmbs', {}).get('face_accuracy', 0.262)
-        B4 = results.get('do_fmbs', {}).get('privacy_score', 0.429)
-        
-        constraints = [
-            {"name": "$B_1 < B_3$", "value": B1 < B3, "left": B1, "right": B3,
-             "meaning": "Defense mechanisms outweigh adversarial inputs"},
-            {"name": "$B_1 < B_4$", "value": B1 < B4, "left": B1, "right": B4,
-             "meaning": "Server coordination outweighs attacks"},
-            {"name": "$|B_2| \\leq |B_1|$", "value": abs(B2) <= abs(B1), "left": abs(B2), "right": abs(B1),
-             "meaning": "Privacy attack impact is no greater than adversarial input impact"},
-            {"name": "$B_2 < B_3$", "value": B2 < B3, "left": B2, "right": B3,
-             "meaning": "Defenses dominate over privacy attacks"},
-            {"name": "$B_2 < B_4$", "value": B2 < B4, "left": B2, "right": B4,
-             "meaning": "Server coordination mitigates attacks"}
-        ]
-    
+    for row in dynamic['constraints'].to_dict('records'):
+        raw_satisfied = row['satisfied']
+        satisfied = (
+            bool(raw_satisfied)
+            if isinstance(raw_satisfied, (bool, np.bool_))
+            else str(raw_satisfied).strip().lower() == 'true'
+        )
+        constraints.append({
+            'name': row['constraint'], 'value': satisfied,
+            'left': float(row['left']), 'right': float(row['right']),
+            'meaning': f"Estimated-coefficient slack = {float(row['slack']):.6f}",
+        })
     return constraints
 
 # ============================================================================
@@ -889,36 +910,40 @@ def run_phase4():
                 st.subheader(" Model Comparison Results")
                 st.dataframe(comparison_df, use_container_width=True)
                 
-                st.subheader(" Mathematical Constraint Satisfaction")
-                constraints = check_constraints(results)
-                
-                for constraint in constraints:
-                    if constraint["value"]:
-                        st.markdown(f'<div class="constraint-satisfied">✓ {constraint["name"]}: {constraint["left"]:.4f} {"<" if "<" in constraint["name"] else "≤"} {constraint["right"]:.4f} - {constraint["meaning"]}</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<div class="constraint-violated">✘ {constraint["name"]}: {constraint["left"]:.4f} {"<" if "<" in constraint["name"] else "≤"} {constraint["right"]:.4f} - {constraint["meaning"]}</div>', unsafe_allow_html=True)
-                
-                st.subheader(" Regression Model Coefficients")
-                coeff_df = pd.DataFrame({
-                    'Coefficient': ['B₀ (Baseline)', 'B₁ (AI Impact)', 'B₂ (PA Impact)', 'B₃ (DM Benefit)', 'B₄ (GS Benefit)'],
-                    'Value': [
-                        0.281,
-                        -abs(results.get('baseline', {}).get('attack_success_rate', 0.538)),
-                        -abs(results.get('baseline', {}).get('privacy_score', 0.462)),
-                        results.get('do_fmbs', {}).get('face_accuracy', 0.262),
-                        results.get('do_fmbs', {}).get('privacy_score', 0.429)
-                    ],
-                    'Interpretation': [
-                        'Baseline system efficiency',
-                        'Adversarial input negative impact',
-                        'Privacy attack negative impact',
-                        'Defense mechanism positive benefit',
-                        'Global server aggregation benefit'
+                st.subheader("Constrained Dynamic-Model Evidence")
+                dynamic = load_dynamic_model_results()
+                if dynamic:
+                    for constraint in check_constraints():
+                        css_class = "constraint-satisfied" if constraint["value"] else "constraint-violated"
+                        symbol = "✓" if constraint["value"] else "✗"
+                        st.markdown(
+                            f'<div class="{css_class}">{symbol} {constraint["name"]}: '
+                            f'left={constraint["left"]:.4f}, right={constraint["right"]:.4f}; '
+                            f'{constraint["meaning"]}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.subheader("Estimated Regression Coefficients")
+                    coeff_df = dynamic['coefficients'][[
+                        'parameter', 'estimate', 'standard_error', 'p_value',
+                        'ci_95_low', 'ci_95_high', 'constraint_satisfied'
+                    ]].copy()
+                    coeff_df.columns = [
+                        'Parameter', 'Estimate', 'Standard Error', 'P-value',
+                        '95% CI Low', '95% CI High', 'Constraint Satisfied'
                     ]
-                })
-                st.dataframe(coeff_df, use_container_width=True)
-                
-                st.markdown(FORMULAS["regression"])
+                    st.dataframe(coeff_df, use_container_width=True, hide_index=True)
+                    st.markdown(FORMULAS["regression"])
+                    st.caption(
+                        "These simulation estimates are loaded from the Phase 6 constrained least-squares "
+                        "artifact; Phase 4 accuracy, privacy, and attack metrics are not reused "
+                        "as regression coefficients."
+                    )
+                else:
+                    st.warning(
+                        "Run Phase 6 to estimate B0, B_AI, B_PA, B_DM and B_GS. "
+                        "Terminal command: python phase6_constrained_dynamic_optimization.py"
+                    )
         
         st.image('do_fmbs_comparison_results.png', caption="Model Comparison Chart", width=700)
         
@@ -1154,6 +1179,201 @@ def run_phase5():
             status_container.error(f"✘ Validation failed.")
 
 # ============================================================================
+# Phase 6: Constrained Dynamic Model and Optimization
+# ============================================================================
+
+def run_phase6():
+    st.header("Phase 6: Constrained Dynamic Model and Optimization")
+    st.markdown("---")
+    st.markdown(
+        "This phase estimates the five coefficients, verifies their mathematical "
+        "constraints, and re-optimizes defense intensity and client participation "
+        "for each federated round."
+    )
+
+    with st.expander("Variable definitions and dynamic equation", expanded=True):
+        st.markdown(FORMULAS["regression"])
+        st.dataframe(pd.DataFrame([
+            {"Variable": "AI_t", "Operational definition": "Adversarial-input pressure: epsilon / 0.30", "Role": "Measured state", "Domain": "0 to 1"},
+            {"Variable": "PA_t", "Operational definition": "2 × max(0, membership-attack accuracy − 0.50)", "Role": "Measured state", "Domain": "fitted: 0 to 0.50"},
+            {"Variable": "DM_t", "Operational definition": "Continuous defense intensity", "Role": "Optimized control", "Domain": "0 to 1"},
+            {"Variable": "GS_t", "Operational definition": "(participating clients − 1) / 4", "Role": "Optimized control", "Domain": "0 to 1"},
+            {"Variable": "Y_(t+1)", "Operational definition": "Simulated next-round FMBS efficiency score", "Role": "Response", "Domain": "0 to 1"},
+        ]), use_container_width=True, hide_index=True)
+        st.info(
+            "The model is dynamic because round-t threats are measured first, "
+            "round-t controls are selected next, and their result is evaluated as "
+            "next-round performance. The controls are recalculated whenever AI or PA changes."
+        )
+
+    if st.button("Estimate coefficients and optimize all rounds", type="primary"):
+        status_container = st.empty()
+        output_container = st.empty()
+        status_container.info("Running constrained coefficient estimation...")
+        success, _ = run_script_with_live_output(
+            'phase6_constrained_dynamic_optimization.py',
+            output_container,
+            status_container,
+        )
+        if success:
+            status_container.success("✓ Phase 6 completed and evidence artifacts were refreshed.")
+            time.sleep(1)
+            st.rerun()
+        else:
+            status_container.error("✗ Phase 6 estimation failed. Review the execution output above.")
+        return
+
+    dynamic = load_dynamic_model_results()
+    if not dynamic:
+        st.warning(
+            "No fitted Phase 6 artifacts were found. Run the button above or execute "
+            "`python phase6_constrained_dynamic_optimization.py` in the terminal."
+        )
+        return
+
+    fit = dynamic['fit']
+    coefficients = dict(zip(fit['names'], fit['coefficients']))
+    st.warning(f"Scope: {fit['scope_statement']}")
+    st.subheader("Estimated equation")
+    st.latex(
+        rf"\widehat{{Y}}_{{t+1}}={coefficients['B0']:.4f}"
+        rf"{coefficients['B_AI']:+.4f}AI_t"
+        rf"{coefficients['B_PA']:+.4f}PA_t"
+        rf"{coefficients['B_DM']:+.4f}DM_t"
+        rf"{coefficients['B_GS']:+.4f}GS_t"
+    )
+
+    metric_columns = st.columns(5)
+    metric_columns[0].metric("Observations", f"{fit['observations']:,}")
+    metric_columns[1].metric("R²", f"{fit['r_squared']:.4f}")
+    metric_columns[2].metric("Adjusted R²", f"{fit['adjusted_r_squared']:.4f}")
+    metric_columns[3].metric("5-fold CV R²", f"{fit['cross_validation_r2_mean']:.4f}")
+    metric_columns[4].metric("RMSE", f"{fit['rmse']:.4f}")
+    st.caption(
+        f"Estimator: {fit['estimator']}. Seed: {fit['seed']}. "
+        f"Maximum coefficient-constraint violation: {fit['maximum_constraint_violation']:.2e}."
+    )
+
+    st.subheader("Coefficient estimates and uncertainty")
+    coefficient_view = dynamic['coefficients'][[
+        'parameter', 'simulation_ground_truth', 'estimate', 'recovery_error',
+        'unconstrained_ols_estimate', 'standardized_estimate', 'standard_error',
+        'p_value', 'ci_95_low', 'ci_95_high', 'constraint'
+    ]].copy()
+    coefficient_view.columns = [
+        'Parameter', 'Simulation Ground Truth', 'Recovered Estimate', 'Recovery Error',
+        'Unconstrained OLS', 'Standardized Estimate', 'Standard Error',
+        'P-value', '95% CI Low', '95% CI High', 'Fitted Sign Restriction'
+    ]
+    st.dataframe(coefficient_view, use_container_width=True, hide_index=True)
+    st.caption(fit['inference_basis'])
+
+    st.subheader("Federated optimization settings")
+    st.dataframe(pd.DataFrame([
+        {"Setting": "Minimum acceptable Y", "Value": fit['target_Y'], "Purpose": "Required feasibility threshold"},
+        {"Setting": "Preferred Y", "Value": fit['preferred_Y'], "Purpose": "Ideal performance band"},
+        {"Setting": "Total federated clients", "Value": 5, "Purpose": "GS = (active clients − 1) / 4"},
+        {"Setting": "Deployable client minimum", "Value": 3, "Purpose": "Rounds with one or two clients are deferred"},
+        {"Setting": "Defense search grid", "Value": "0.00 to 1.00, step 0.05", "Purpose": "Candidate DM values"},
+        {"Setting": "Client search grid", "Value": "3 to 5 clients", "Purpose": "Candidate GS values: 0.50, 0.75, 1.00"},
+        {"Setting": "Control cost", "Value": "0.60 DM² + 0.40 GS²", "Purpose": "Prefer the lowest feasible resource use"},
+        {"Setting": "Switching penalties", "Value": "0.15 ΔDM² + 0.10 ΔGS²", "Purpose": "Avoid abrupt round-to-round changes"},
+    ]), use_container_width=True, hide_index=True)
+    phase2_parameters = {}
+    if os.path.exists('do_fmbs_data/baseline_metrics.pkl'):
+        with open('do_fmbs_data/baseline_metrics.pkl', 'rb') as stream:
+            phase2_parameters = pickle.load(stream).get('training_parameters', {})
+    st.markdown("**Fixed federated-training settings (context, not Phase 6 decision variables)**")
+    st.dataframe(pd.DataFrame([
+        {"Setting": "Federated rounds", "Current value": phase2_parameters.get('rounds', 'artifact unavailable'), "Phase 6 status": "Fixed"},
+        {"Setting": "Local epochs per round", "Current value": phase2_parameters.get('local_epochs', 'artifact unavailable'), "Phase 6 status": "Fixed"},
+        {"Setting": "Batch size", "Current value": phase2_parameters.get('batch_size', 'artifact unavailable'), "Phase 6 status": "Fixed"},
+        {"Setting": "Adam learning rate", "Current value": 0.001, "Phase 6 status": "Fixed in phase2_federated_learning.py"},
+        {"Setting": "Defense intensity (DM)", "Current value": "selected each round", "Phase 6 status": "Optimized"},
+        {"Setting": "Participating clients / GS", "Current value": "3, 4, or 5", "Phase 6 status": "Optimized"},
+    ]), use_container_width=True, hide_index=True)
+    st.markdown(
+        "For every round the optimizer enumerates all deployable DM and GS choices. "
+        "It first selects the least-cost choice reaching preferred Y ≥ 0.70; if none "
+        "exists, it selects the least-cost choice reaching minimum Y ≥ 0.60. If neither "
+        "target is feasible, maximum controls are reported for diagnosis and deployment "
+        "is rejected or deferred."
+    )
+    st.markdown("**Cost-weight sensitivity at AI=0.3333 and PA=0.30**")
+    st.dataframe(dynamic['sensitivity'], use_container_width=True, hide_index=True)
+    st.caption(
+        "The balanced, defense-sparing, and participation-sparing policies all "
+        "meet the minimum target but select different DM/client combinations. "
+        "This makes the effect of the declared resource-cost weights explicit."
+    )
+
+    st.subheader("Round-by-round dynamic optimization")
+    schedule = dynamic['schedule'].copy()
+    st.dataframe(schedule, use_container_width=True, hide_index=True)
+    schedule_figure = go.Figure()
+    for column, label in [('AI', 'AI threat'), ('PA', 'PA threat'), ('DM', 'DM control'),
+                          ('GS', 'GS participation'), ('predicted_Y', 'Predicted Y')]:
+        schedule_figure.add_trace(go.Scatter(
+            x=schedule['round'], y=schedule[column], mode='lines+markers', name=label
+        ))
+    schedule_figure.add_hline(y=fit['target_Y'], line_dash='dash', line_color='#c53030',
+                              annotation_text='Minimum Y = 0.60')
+    schedule_figure.update_layout(
+        xaxis_title='Federated round', yaxis_title='Normalized value',
+        yaxis_range=[0, 1.05], height=480
+    )
+    st.plotly_chart(schedule_figure, use_container_width=True)
+
+    st.subheader("Acceptable operating ranges and required actions")
+    st.dataframe(dynamic['ranges'], use_container_width=True, hide_index=True)
+    st.caption(
+        "These are declared project engineering gates for this simulation. They are "
+        "decision thresholds, not universal biometric or security standards."
+    )
+
+    st.subheader("Stress-test deployment decisions")
+    st.dataframe(dynamic['stresses'], use_container_width=True, hide_index=True)
+
+    st.subheader("Coefficient constraint verification")
+    st.dataframe(dynamic['constraints'], use_container_width=True, hide_index=True)
+    if bool(fit['constraints_satisfied']):
+        st.success("✓ All fitted sign restrictions and evaluated simulation hypotheses are satisfied.")
+    else:
+        st.error("✗ At least one declared coefficient constraint failed; do not accept the fitted model.")
+
+    st.subheader("Evidence files")
+    st.code(
+        "simulation_evidence/constrained_dynamic_model/model_fit.json\n"
+        "simulation_evidence/constrained_dynamic_model/coefficient_estimates.csv\n"
+        "simulation_evidence/constrained_dynamic_model/constraint_checks.csv\n"
+        "simulation_evidence/constrained_dynamic_model/dynamic_optimization_schedule.csv\n"
+        "simulation_evidence/constrained_dynamic_model/cost_weight_sensitivity.csv\n"
+        "simulation_evidence/constrained_dynamic_model/acceptance_ranges.csv\n"
+        "simulation_evidence/constrained_dynamic_model/stress_test_scenarios.csv",
+        language="text",
+    )
+    report_dir = os.path.join('docs', 'constrained_dynamic_model')
+    report_files = [
+        ('Professional Word report', os.path.join(report_dir, 'DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.docx'),
+         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        ('Professional PDF report', os.path.join(report_dir, 'DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.pdf'),
+         'application/pdf'),
+    ]
+    available_reports = [item for item in report_files if os.path.exists(item[1])]
+    if available_reports:
+        st.markdown("**Download the professional documentation**")
+        columns = st.columns(len(available_reports))
+        for column, (label, path, mime_type) in zip(columns, available_reports):
+            with open(path, 'rb') as stream:
+                report_bytes = stream.read()
+            column.download_button(
+                label=label,
+                data=report_bytes,
+                file_name=os.path.basename(path),
+                mime=mime_type,
+            )
+
+# ============================================================================
 # Main Application
 # ============================================================================
 
@@ -1172,25 +1392,25 @@ def main():
         st.markdown("---")
         st.markdown("### Navigation")
         
-        # ADDED PHASE 5 TO NAVIGATION
         phase = st.radio("Select Phase", 
             ["Home", "Phase 1: Data Prep", "Phase 2: Federated Learning", 
-             "Phase 3: Attacks", "Phase 4: Defense", "Phase 5: Validation"])
+             "Phase 3: Attacks", "Phase 4: Defense", "Phase 5: Validation",
+             "Phase 6: Dynamic Optimization"])
         
         st.markdown("---")
         
-        # Progress tracker - ADDED PHASE 5
         st.markdown("###  Progress")
         phases_status = {
             "Phase 1": os.path.exists('do_fmbs_data/face_data.npz'),
             "Phase 2": os.path.exists('do_fmbs_data/baseline_model.keras'),
             "Phase 3": os.path.exists('do_fmbs_attack_results.png'),
             "Phase 4": os.path.exists('do_fmbs_comparison_results.png'),
-            "Phase 5": os.path.exists('do_fmbs_data/validation_results.pkl')  # ADDED
+            "Phase 5": os.path.exists('do_fmbs_data/validation_results.pkl'),
+            "Phase 6": os.path.exists(os.path.join(DYNAMIC_RESULTS_DIR, 'model_fit.json')),
         }
         
         completed = sum(phases_status.values())
-        st.write(f"**Completed:** {completed}/5 phases")
+        st.write(f"**Completed:** {completed}/6 phases")
         for name, done in phases_status.items():
             st.write(f"{'✓' if done else '↻'} {name}")
         
@@ -1214,7 +1434,7 @@ def main():
         
         # Completion status
         completed = sum(phases_status.values())
-        st.metric("Research Progress", f"{completed}/5 Phases Complete")
+        st.metric("Research Progress", f"{completed}/6 Phases Complete")
         
         # Dataset preview
         face_imgs = load_face_images()
@@ -1284,7 +1504,7 @@ def main():
             2. Click the Run button to execute that phase<br>
             3. Watch the REAL-TIME output in the terminal window<br>
             4. Results appear automatically with data tables and mathematical validation</p>
-            <p><b>Note:</b> Phase 1: 5-10 min | Phase 2: 10-15 min | Phase 3: 5-10 min | Phase 4: 15-20 min | Phase 5: 5-10 min</p>
+            <p><b>Note:</b> Phase 1: 5-10 min | Phase 2: 10-15 min | Phase 3: 5-10 min | Phase 4: 15-20 min | Phase 5: 5-10 min | Phase 6: under 1 min</p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1296,8 +1516,10 @@ def main():
         run_phase3()
     elif phase == "Phase 4: Defense":
         run_phase4()
-    elif phase == "Phase 5: Validation":  # ADDED
+    elif phase == "Phase 5: Validation":
         run_phase5()
+    elif phase == "Phase 6: Dynamic Optimization":
+        run_phase6()
 
 if __name__ == "__main__":
     main()
