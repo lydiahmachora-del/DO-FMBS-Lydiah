@@ -1,0 +1,82 @@
+# Code-only publication policy
+# Reports, explanatory documents, generated evidence, datasets, trained models,
+# plots, logs, and other run outputs remain local to the research machine.
+
+# Human-readable documents and presentations
+*.md
+*.pdf
+*.docx
+*.pptx
+*.ppt
+*.rtf
+*.html
+
+# Generated machine-readable evidence and logs
+*.csv
+*.json
+*.jsonl
+*.log
+*.txt
+!requirements_app.txt
+
+# Datasets, serialized models, and numerical artifacts
+*.keras
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.npz
+*.npy
+*.ckpt
+
+# Generated figures and media
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.gif
+
+# Project output directories
+/docs/
+/do_fmbs_data/
+/simulation_evidence/
+/runtime_metrics_evidence/
+/runtime_recording/
+/extracted_pptx_media/
+/downloads/
+
+# Python caches, coverage, and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Local editor and agent metadata
+.agents/
+.codex/
+.vscode/
+.idea/
+
+# Nested/local Git copy accidentally created in the workspace
+/DO-FMBS/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini

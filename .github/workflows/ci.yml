@@ -1,0 +1,106 @@
+name: Code quality and core tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Python 3.11 validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: Agg
+      TF_CPP_MIN_LOG_LEVEL: "2"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements_app.txt
+
+      - name: Install portable test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==1.24.3 scipy==1.15.3
+          python -m pip check
+
+      - name: Enforce code-only repository policy
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import PurePosixPath
+          import subprocess
+
+          forbidden_directories = {
+              "docs",
+              "do_fmbs_data",
+              "simulation_evidence",
+              "runtime_metrics_evidence",
+              "runtime_recording",
+          }
+          forbidden_extensions = {
+              ".md", ".pdf", ".docx", ".pptx", ".csv", ".json", ".log",
+              ".png", ".jpg", ".jpeg", ".svg", ".keras", ".h5", ".pkl",
+              ".npz", ".npy",
+          }
+
+          tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          rejected = []
+          for raw_path in tracked:
+              path = PurePosixPath(raw_path)
+              if forbidden_directories.intersection(path.parts):
+                  rejected.append(raw_path)
+              elif path.suffix.lower() in forbidden_extensions:
+                  rejected.append(raw_path)
+
+          if rejected:
+              raise SystemExit(
+                  "Local-only files were committed:\n" + "\n".join(sorted(rejected))
+              )
+          print(f"Code-only policy verified for {len(tracked)} tracked files.")
+          PY
+
+      - name: Compile Python source
+        run: |
+          python -m compileall -q \
+            app.py \
+            phase1_data_preparation.py \
+            phase2_federated_learning.py \
+            phase3_adversarial_attacks.py \
+            phase4_defense_mechanisms.py \
+            phase5_model_validation.py \
+            phase6_constrained_dynamic_optimization.py \
+            scripts \
+            tests
+
+      - name: Run portable unit tests
+        run: |
+          python -m unittest -v \
+            tests.test_constrained_dynamic_model \
+            tests.test_instrumented_pipeline_evidence.InstrumentedPipelineUnitTests
+
+      - name: Run constrained-model smoke simulation
+        run: python phase6_constrained_dynamic_optimization.py
+
+      - name: Verify smoke outputs remain untracked
+        shell: bash
+        run: |
+          test -s simulation_evidence/constrained_dynamic_model/model_fit.json
+          test -s simulation_evidence/constrained_dynamic_model/dynamic_optimization_schedule.csv
+          test -z "$(git status --short)"
