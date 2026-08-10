@@ -21,4 +21,4 @@ opencv-python>=4.8.0
 # Professional report generation and PDF quality checks
 python-docx==0.8.11
 reportlab>=5.0.0
-pymupdf>=1.28.0
+pymupdf>=1.28.2
