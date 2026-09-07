@@ -15,7 +15,7 @@ plotly>=5.17.0
 streamlit>=1.28.0
 
 # Utilities
-pillow>=10.0.0
+pillow>=12.3.0
 opencv-python>=4.8.0
 
 # Professional report generation and PDF quality checks
