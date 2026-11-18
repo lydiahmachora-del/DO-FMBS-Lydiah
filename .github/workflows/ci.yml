@@ -62,11 +62,28 @@ jobs:
       - name: Run constrained-model smoke simulation
         run: python phase6_constrained_dynamic_optimization.py --output-dir "$RUNNER_TEMP/constrained-dynamic-model-smoke"
 
-      - name: Verify isolated smoke outputs and clean checkout
+      - name: Verify isolated smoke outputs and model constraints
         shell: bash
         env:
           SMOKE_OUTPUT_DIR: ${{ runner.temp }}/constrained-dynamic-model-smoke
         run: |
           test -s "$SMOKE_OUTPUT_DIR/model_fit.json"
           test -s "$SMOKE_OUTPUT_DIR/dynamic_optimization_schedule.csv"
-          test -z "$(git status --short)"
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["SMOKE_OUTPUT_DIR"]).resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if output_dir.is_relative_to(workspace):
+              raise SystemExit("Smoke evidence must be written outside the checkout.")
+
+          fit = json.loads((output_dir / "model_fit.json").read_text())
+          with (output_dir / "dynamic_optimization_schedule.csv").open(newline="") as stream:
+              schedule = list(csv.DictReader(stream))
+          if not fit["constraints_satisfied"] or len(schedule) != 12:
+              raise SystemExit("Smoke evidence is incomplete or violates model constraints.")
+          print("Smoke evidence is complete, constraint-valid, and isolated from the checkout.")
+          PY
