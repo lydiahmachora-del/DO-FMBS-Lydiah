@@ -305,6 +305,38 @@ def build_report(manifest: dict, output: Path) -> Report:
         "reported later from the verification protocol."
     )
     copy_figure(report, manifest, output, "federated_training_convergence.png", "Modality-specific federated training convergence")
+    convergence = fed["history"]
+    convergence_rows = [
+        [
+            str(round_id),
+            pct(face_accuracy),
+            pct(fingerprint_accuracy),
+            number(face_loss),
+            number(fingerprint_loss),
+        ]
+        for round_id, face_accuracy, fingerprint_accuracy, face_loss, fingerprint_loss in zip(
+            convergence["round"],
+            convergence["face_accuracy"],
+            convergence["fingerprint_accuracy"],
+            convergence["face_loss"],
+            convergence["fingerprint_loss"],
+        )
+    ]
+    report.page_break()
+    report.table(
+        "Round-by-round modality-specific convergence values",
+        ["Round", "Face accuracy", "Fingerprint accuracy", "Face loss", "Fingerprint loss"],
+        convergence_rows,
+        "do_fmbs_data/phase2_metrics.json",
+    )
+    report.paragraph(
+        "The table provides the plotted values for each of the 12 federated rounds. Accuracy is shown as a "
+        "percentage; losses are cross-entropy values. For each modality and round, the plotted metric is "
+        "the client-weighted average (using the aggregation weights in Table 4.4) of the five clients' "
+        "final local-epoch metrics. Thus, the values are generated from the recorded federated training "
+        "history, not estimated from the figure. These are training-convergence metrics, not the separate "
+        "held-out test results reported above."
+    )
 
     report.heading("4.3 Adversarial Attack Simulation", 2)
     report.paragraph(

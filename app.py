@@ -251,6 +251,38 @@ def metric_card_row(items: list[tuple[str, str]]) -> None:
         column.metric(label, value)
 
 
+def render_federated_history(history: dict, manifest: dict | None, run_dir: Path | None) -> None:
+    if not history or not history.get("round"):
+        return
+    convergence = artifact_path(manifest, "federated_training_convergence.png") if manifest else None
+    if convergence is None and run_dir:
+        candidate = run_dir / "do_fmbs_data" / "figures" / "federated_training_convergence.png"
+        convergence = candidate if candidate.exists() else None
+    if convergence:
+        st.image(str(convergence), caption="Modality-specific federated training convergence", use_container_width=True)
+    else:
+        chart = pd.DataFrame({
+            "Face weighted local accuracy": history["face_accuracy"],
+            "Fingerprint weighted local accuracy": history["fingerprint_accuracy"],
+        }, index=history["round"])
+        chart.index.name = "Federated round"
+        st.line_chart(chart, height=280)
+    table = pd.DataFrame({
+        "Federated round": history["round"],
+        "Face weighted local accuracy": [percent(value) for value in history["face_accuracy"]],
+        "Fingerprint weighted local accuracy": [percent(value) for value in history["fingerprint_accuracy"]],
+        "Face cross-entropy loss": [f"{value:.4f}" for value in history["face_loss"]],
+        "Fingerprint cross-entropy loss": [f"{value:.4f}" for value in history["fingerprint_loss"]],
+        "Combined loss": [f"{value:.4f}" for value in history["total_loss"]],
+    })
+    st.subheader("Round values behind the convergence graph")
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.caption("Accuracy and loss are alpha-weighted averages of the five clients' final local-epoch metrics for each round. The combined loss uses equal 0.5/0.5 modality weights. These are training-history values, not final test metrics.")
+    st.download_button("Download round values (CSV)", data=table.to_csv(index=False),
+                       file_name="federated_convergence_round_values.csv", mime="text/csv",
+                       key="download_federated_round_values")
+
+
 def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path | None) -> None:
     if not manifest:
         if run_dir:
@@ -299,11 +331,7 @@ def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path 
                          "Accuracy": percent(result["accuracy"]), "Test cross-entropy": f"{result['loss']:.4f}"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         history = fed.get("history", {})
-        if history:
-            frame = pd.DataFrame({"Round": history["round"], "Face accuracy": history["face_accuracy"],
-                                  "Fingerprint accuracy": history["fingerprint_accuracy"],
-                                  "Face loss": history["face_loss"], "Fingerprint loss": history["fingerprint_loss"]})
-            st.line_chart(frame.set_index("Round"), height=300)
+        render_federated_history(history, manifest, run_dir)
         image = artifact_path(manifest, "federated_client_distribution.png")
         if image:
             st.image(str(image), caption="Class-exclusive non-IID client allocation", use_container_width=True)
@@ -489,7 +517,16 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
         if number in output_names:
             payload = load_json(run_dir / "do_fmbs_data" / output_names[number])
             if payload:
-                st.json(payload, expanded=False)
+                if number == 2 and payload.get("history"):
+                    render_federated_history(payload["history"], None, run_dir)
+                    st.dataframe(pd.DataFrame([
+                        {"Modality": "Face", "Accuracy": percent(payload["face_classification"]["accuracy"]),
+                         "Test loss": f"{payload['face_classification']['loss']:.4f}"},
+                        {"Modality": "Fingerprint", "Accuracy": percent(payload["fingerprint_classification"]["accuracy"]),
+                         "Test loss": f"{payload['fingerprint_classification']['loss']:.4f}"},
+                    ]), use_container_width=True, hide_index=True)
+                else:
+                    st.json(payload, expanded=False)
         else:
             st.info("Phase 6 outputs are saved in the replay's simulation_evidence/constrained_dynamic_model folder.")
 
