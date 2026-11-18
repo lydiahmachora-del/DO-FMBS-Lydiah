@@ -1,2 +1,10 @@
-*.docx -text -diff
-*.pdf -text -diff
+* text=auto
+
+.gitignore text eol=lf
+.gitattributes text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.bat text eol=crlf

@@ -1,283 +1,232 @@
-"""
-DO-FMBS Research Project - Phase 1: Data Loading & Preprocessing
-Privacy-Preservation Model for Federated Multimodal Biometric System
+"""Phase 1: leakage-free data preparation and fingerprint quality gating."""
+from __future__ import annotations
 
-Researcher: Lydiah Moraa Machora | Reg No: I152/P/9515/23
-University: Jaramogi Oginga Odinga University of Science and Technology
-
-This script:
-1. Loads LFW face dataset
-2. Generates synthetic fingerprint dataset (FVC-style)
-3. Creates non-IID federated clients
-4. Saves all data for Phase 2
-"""
-
-import numpy as np
-import matplotlib.pyplot as plt
+import argparse
+import json
 import os
-from scipy import ndimage
+import platform
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 from sklearn.datasets import fetch_lfw_people
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 
-# ============================================================================
-# 1. LOAD FACE DATA (LFW)
-# ============================================================================
-print("=" * 60)
-print("DO-FMBS Phase 1: Data Preparation")
-print("=" * 60)
-
-print("\n[1/4] Loading LFW Face Dataset...")
-lfw = fetch_lfw_people(min_faces_per_person=20, resize=0.4, color=False)
-
-X_face = lfw.images
-y_face = lfw.target
-n_face_classes = len(lfw.target_names)
-n_face_features = X_face.shape[1] * X_face.shape[2]
-image_shape_face = X_face.shape[1:]
-
-print(f"    Loaded {X_face.shape[0]} images of {n_face_classes} people")
-print(f"    Image size: {image_shape_face[0]} x {image_shape_face[1]} pixels")
-
-# Flatten and normalize
-X_face_flat = X_face.reshape(X_face.shape[0], n_face_features)
-scaler_face = StandardScaler()
-X_face_norm = scaler_face.fit_transform(X_face_flat)
-
-# Train/test split (80/20)
-X_train_face, X_test_face, y_train_face, y_test_face = train_test_split(
-    X_face_norm, y_face, test_size=0.2, random_state=42, stratify=y_face
+from do_fmbs_core import (
+    CLIENT_PARTITION_SEED,
+    FACE_SPLIT_SEED,
+    FINGERPRINT_IDENTITY_SEED,
+    FINGERPRINT_IMPRESSION_SEED,
+    fingerprint_impression_split,
+    fingerprint_separability_diagnostics,
+    fit_training_scaler,
+    generate_fingerprint_dataset,
+    json_dump,
+    non_iid_identity_partitions,
+    save_scaler,
+    set_global_determinism,
+    stratified_three_way_split,
+    validate_disjoint_splits,
 )
 
-print(f"    Split: {X_train_face.shape[0]} train, {X_test_face.shape[0]} test")
 
-# Save face data
-os.makedirs('do_fmbs_data', exist_ok=True)
-np.savez_compressed('do_fmbs_data/face_data.npz',
-    X_train=X_train_face, X_test=X_test_face,
-    y_train=y_train_face, y_test=y_test_face,
-    n_classes=np.array([n_face_classes]),
-    n_features=np.array([n_face_features]),
-    image_shape=image_shape_face
-)
-print("    Saved: do_fmbs_data/face_data.npz")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=Path("do_fmbs_data"))
+    parser.add_argument("--clients", type=int, default=5)
+    parser.add_argument("--fingerprint-identities", type=int, default=100)
+    parser.add_argument("--fingerprint-impressions", type=int, default=8)
+    return parser.parse_args()
 
-# ============================================================================
-# 2. GENERATE SYNTHETIC FINGERPRINT DATA
-# ============================================================================
-print("\n[2/4] Generating Synthetic Fingerprint Dataset...")
 
-def generate_one_fingerprint(height=96, width=96, seed=None):
-    """Creates one synthetic fingerprint image"""
-    if seed is not None:
-        np.random.seed(seed)
-    
-    x = np.linspace(0, 4*np.pi, width)
-    y = np.linspace(0, 4*np.pi, height)
-    xx, yy = np.meshgrid(x, y)
-    
-    angle = np.random.uniform(0, np.pi)
-    freq = np.random.uniform(0.8, 1.2)
-    ridges = (np.sin(freq*(xx*np.cos(angle) + yy*np.sin(angle))) +
-              0.3*np.sin(2*freq*(xx*np.sin(angle) - yy*np.cos(angle))))
-    
-    r = np.sqrt((xx/width - 0.5)**2 + (yy/height - 0.5)**2)
-    center = np.exp(-r*8) * np.sin(r*20)
-    
-    fp = ridges + 0.5*center
-    fp = fp + np.random.normal(0, 0.15, (height, width))
-    fp = ndimage.gaussian_filter(fp, sigma=0.8)
-    fp = ((fp - fp.min()) / (fp.max() - fp.min()) * 255).astype(np.uint8)
-    return fp
+def save_similarity_figure(path: Path, same: np.ndarray, different: np.ndarray) -> None:
+    fig, ax = plt.subplots(figsize=(8.2, 5.0))
+    bins = np.linspace(-0.4, 1.0, 60)
+    ax.hist(different, bins=bins, density=True, alpha=0.68, color="#C44E52", label="Different identity")
+    ax.hist(same, bins=bins, density=True, alpha=0.68, color="#4C72B0", label="Same identity")
+    ax.set(xlabel="Ridge-descriptor cosine similarity", ylabel="Density",
+           title="Synthetic Fingerprint Identity-Separability Gate")
+    ax.legend(frameon=False)
+    ax.grid(axis="y", alpha=0.22)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
-n_fingers = 100
-n_impressions = 8
-height, width = 96, 96
 
-images, labels = [], []
-for finger_id in range(n_fingers):
-    for imp in range(n_impressions):
-        seed = finger_id * 100 + imp
-        fp = generate_one_fingerprint(height, width, seed)
-        var = np.random.RandomState(seed).normal(0, 8, (height, width))
-        fp = np.clip(fp.astype(float) + var, 0, 255).astype(np.uint8)
-        images.append(fp)
-        labels.append(finger_id)
-    if (finger_id + 1) % 25 == 0:
-        print(f"    Generated {finger_id+1}/{n_fingers} fingers...")
+def save_fingerprint_grids(output_root: Path, images: np.ndarray) -> None:
+    fig, axes = plt.subplots(4, 8, figsize=(12, 6.4))
+    for identity in range(4):
+        for impression in range(8):
+            ax = axes[identity, impression]
+            ax.imshow(images[identity * 8 + impression], cmap="gray", vmin=0, vmax=255)
+            ax.set_title(f"F{identity:03d}/I{impression}", fontsize=7)
+            ax.axis("off")
+    fig.suptitle("Persistent Synthetic Finger Identities: Eight Controlled Impressions Each", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(output_root / "fingerprint_same_identity_grid.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
-images = np.array(images)
-labels = np.array(labels)
-n_finger_classes = n_fingers
-n_finger_features = height * width
-image_shape_finger = (height, width)
+    fig, axes = plt.subplots(4, 5, figsize=(8, 6.4))
+    for index, ax in enumerate(axes.flat):
+        ax.imshow(images[index * 8], cmap="gray", vmin=0, vmax=255)
+        ax.set_title(f"Finger {index:03d}", fontsize=8)
+        ax.axis("off")
+    fig.suptitle("Between-Identity Synthetic Fingerprint Comparison", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(output_root / "fingerprint_identity_comparison.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
-print(f"    Generated {len(images)} fingerprint images")
 
-# Flatten and normalize
-X_finger_flat = images.reshape(images.shape[0], n_finger_features).astype(np.float64)
-scaler_finger = StandardScaler()
-X_finger_norm = scaler_finger.fit_transform(X_finger_flat)
+def save_face_grid(path: Path, images: np.ndarray, labels: np.ndarray, names: np.ndarray) -> None:
+    fig, axes = plt.subplots(3, 4, figsize=(9.2, 7.0))
+    for index, ax in enumerate(axes.flat):
+        ax.imshow(images[index], cmap="gray")
+        ax.set_title(str(names[labels[index]]), fontsize=7)
+        ax.axis("off")
+    fig.suptitle("LFW Face Samples (Training Partition)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
-# Train/test split (80/20)
-X_train_finger, X_test_finger, y_train_finger, y_test_finger = train_test_split(
-    X_finger_norm, labels, test_size=0.2, random_state=42, stratify=labels
-)
 
-print(f"    Split: {X_train_finger.shape[0]} train, {X_test_finger.shape[0]} test")
+def main() -> int:
+    args = parse_args()
+    if args.fingerprint_identities != 100 or args.fingerprint_impressions != 8:
+        raise ValueError("The final study protocol requires exactly 100 identities and eight impressions")
+    set_global_determinism()
+    started = time.perf_counter()
+    output = args.output_dir
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "clients").mkdir(parents=True, exist_ok=True)
+    figures = output / "figures"
+    figures.mkdir(parents=True, exist_ok=True)
 
-# Save fingerprint data
-np.savez_compressed('do_fmbs_data/fingerprint_data.npz',
-    X_train=X_train_finger, X_test=X_test_finger,
-    y_train=y_train_finger, y_test=y_test_finger,
-    n_classes=np.array([n_finger_classes]),
-    n_features=np.array([n_finger_features]),
-    image_shape=image_shape_finger
-)
-print("    Saved: do_fmbs_data/fingerprint_data.npz")
-
-# ============================================================================
-# 3. CREATE FEDERATED CLIENTS (Non-IID)
-# ============================================================================
-print("\n[3/4] Creating Non-IID Federated Clients...")
-
-def non_iid_partition(X, y, n_clients=5, random_state=42):
-    """Non-IID: assigns specific identity classes to each client"""
-    np.random.seed(random_state)
-    all_classes = np.unique(y)
-    shuffled = np.random.permutation(all_classes)
-    groups = np.array_split(shuffled, n_clients)
-    result = []
-    for g in groups:
-        mask = np.isin(y, g)
-        result.append({'X': X[mask], 'y': y[mask], 'n': int(mask.sum())})
-    return result
-
-face_parts = non_iid_partition(X_train_face, y_train_face, 5, 42)
-finger_parts = non_iid_partition(X_train_finger, y_train_finger, 5, 42)
-
-os.makedirs('do_fmbs_data/clients', exist_ok=True)
-
-clients = []
-for i in range(5):
-    c = {
-        'client_id': i,
-        'face_X': face_parts[i]['X'],
-        'face_y': face_parts[i]['y'],
-        'face_samples': face_parts[i]['n'],
-        'finger_X': finger_parts[i]['X'],
-        'finger_y': finger_parts[i]['y'],
-        'finger_samples': finger_parts[i]['n'],
-        'total_samples': face_parts[i]['n'] + finger_parts[i]['n']
-    }
-    clients.append(c)
-    print(f"    Client {i}: face={c['face_samples']:4d} | fingerprint={c['finger_samples']:4d} | total={c['total_samples']:4d}")
-
-# Save each client
-for c in clients:
-    np.savez_compressed(
-        f'do_fmbs_data/clients/client_{c["client_id"]}.npz',
-        face_X=c['face_X'], face_y=c['face_y'],
-        finger_X=c['finger_X'], finger_y=c['finger_y']
+    print("DO-FMBS Phase 1: leakage-free data preparation")
+    print("[1/5] Loading public LFW face data")
+    lfw = fetch_lfw_people(min_faces_per_person=20, resize=0.4, color=False)
+    face_images = np.asarray(lfw.images, dtype=np.float32)
+    face_labels = np.asarray(lfw.target, dtype=np.int64)
+    face_train, face_cal, face_test = stratified_three_way_split(
+        face_labels, calibration_size=0.15, test_size=0.15, seed=FACE_SPLIT_SEED
     )
-    print(f"    Saved: do_fmbs_data/clients/client_{c['client_id']}.npz")
+    validate_disjoint_splits(face_train, face_cal, face_test)
+    face_flat = face_images.reshape(len(face_images), -1).astype(np.float64)
+    face_scaler, face_scaled = fit_training_scaler(face_flat, face_train)
+    save_scaler(output / "face_scaler.npz", face_scaler, face_train)
+    np.savez_compressed(
+        output / "face_data.npz",
+        X_train=face_scaled[face_train], X_calibration=face_scaled[face_cal], X_test=face_scaled[face_test],
+        y_train=face_labels[face_train], y_calibration=face_labels[face_cal], y_test=face_labels[face_test],
+        images_train=face_images[face_train], images_calibration=face_images[face_cal], images_test=face_images[face_test],
+        train_indices=face_train, calibration_indices=face_cal, test_indices=face_test,
+        n_classes=np.asarray([len(lfw.target_names)]), n_features=np.asarray([face_flat.shape[1]]),
+        image_shape=np.asarray(face_images.shape[1:]), target_names=np.asarray(lfw.target_names),
+        scaler_fit_partition=np.asarray(["training"]), split_seed=np.asarray([FACE_SPLIT_SEED]),
+    )
+    save_face_grid(figures / "face_training_samples.png", face_images[face_train], face_labels[face_train], lfw.target_names)
 
-# ============================================================================
-# 4. VISUALIZATION (Optional - saves images)
-# ============================================================================
-print("\n[4/4] Generating visualizations...")
+    print("[2/5] Generating identity-persistent synthetic fingerprints")
+    finger_images, finger_labels, impression_ids, templates = generate_fingerprint_dataset(
+        args.fingerprint_identities, args.fingerprint_impressions
+    )
+    diagnostics, same_scores, different_scores = fingerprint_separability_diagnostics(
+        finger_images, finger_labels
+    )
+    json_dump(output / "fingerprint_quality_diagnostics.json", diagnostics)
+    np.savez_compressed(
+        output / "fingerprint_similarity_scores.npz",
+        same_identity=same_scores.astype(np.float32),
+        different_identity=different_scores.astype(np.float32),
+    )
+    json_dump(output / "fingerprint_identity_templates.json", templates)
+    save_similarity_figure(figures / "fingerprint_similarity_distributions.png", same_scores, different_scores)
+    save_fingerprint_grids(figures, finger_images)
+    if not diagnostics["passed"]:
+        raise RuntimeError(
+            "Fingerprint identity-separability gate failed; training is scientifically invalid. "
+            + json.dumps(diagnostics, sort_keys=True)
+        )
 
-# Visualize face samples
-fig, axes = plt.subplots(3, 4, figsize=(14, 9))
-fig.suptitle('DO-FMBS Face Modality: Sample LFW Images', fontsize=13, fontweight='bold')
+    print("[3/5] Creating fixed 5/1/2 fingerprint train/calibration/test split")
+    finger_train, finger_cal, finger_test = fingerprint_impression_split(impression_ids)
+    validate_disjoint_splits(finger_train, finger_cal, finger_test)
+    finger_flat = finger_images.reshape(len(finger_images), -1).astype(np.float64)
+    finger_scaler, finger_scaled = fit_training_scaler(finger_flat, finger_train)
+    save_scaler(output / "fingerprint_scaler.npz", finger_scaler, finger_train)
+    np.savez_compressed(
+        output / "fingerprint_data.npz",
+        X_train=finger_scaled[finger_train], X_calibration=finger_scaled[finger_cal], X_test=finger_scaled[finger_test],
+        y_train=finger_labels[finger_train], y_calibration=finger_labels[finger_cal], y_test=finger_labels[finger_test],
+        images_train=finger_images[finger_train], images_calibration=finger_images[finger_cal], images_test=finger_images[finger_test],
+        impression_train=impression_ids[finger_train], impression_calibration=impression_ids[finger_cal], impression_test=impression_ids[finger_test],
+        train_indices=finger_train, calibration_indices=finger_cal, test_indices=finger_test,
+        n_classes=np.asarray([args.fingerprint_identities]), n_features=np.asarray([finger_flat.shape[1]]),
+        image_shape=np.asarray(finger_images.shape[1:]), scaler_fit_partition=np.asarray(["training"]),
+        identity_seed_base=np.asarray([FINGERPRINT_IDENTITY_SEED]), impression_seed_base=np.asarray([FINGERPRINT_IMPRESSION_SEED]),
+    )
 
-for idx, ax in enumerate(axes.flat):
-    if idx < len(X_train_face[:12]):
-        img = X_train_face[idx].reshape(image_shape_face[0], image_shape_face[1])
-        ax.imshow(img, cmap='gray')
-        ax.set_title(lfw.target_names[y_train_face[idx]], fontsize=8)
-        ax.axis('off')
+    print("[4/5] Persisting the exact non-IID identity allocation used by Phase 2")
+    face_client_indices = non_iid_identity_partitions(face_labels[face_train], args.clients, CLIENT_PARTITION_SEED)
+    finger_client_indices = non_iid_identity_partitions(finger_labels[finger_train], args.clients, CLIENT_PARTITION_SEED + 1)
+    client_rows = []
+    for client_id, (fi, pi) in enumerate(zip(face_client_indices, finger_client_indices)):
+        np.savez_compressed(
+            output / "clients" / f"client_{client_id}.npz",
+            face_X=face_scaled[face_train][fi], face_y=face_labels[face_train][fi],
+            finger_X=finger_scaled[finger_train][pi], finger_y=finger_labels[finger_train][pi],
+            face_source_indices=face_train[fi], finger_source_indices=finger_train[pi],
+        )
+        client_rows.append({
+            "client_id": client_id, "face_samples": int(len(fi)), "fingerprint_samples": int(len(pi)),
+            "face_identities": [int(v) for v in np.unique(face_labels[face_train][fi])],
+            "fingerprint_identities": [int(v) for v in np.unique(finger_labels[finger_train][pi])],
+        })
+    json_dump(output / "client_partition.json", {
+        "strategy": "class-exclusive non-IID allocation; modality identity spaces partitioned independently",
+        "seed": CLIENT_PARTITION_SEED, "clients": client_rows,
+    })
+    x = np.arange(args.clients)
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    ax.bar(x - 0.18, [r["face_samples"] for r in client_rows], 0.36, label="Face")
+    ax.bar(x + 0.18, [r["fingerprint_samples"] for r in client_rows], 0.36, label="Fingerprint")
+    ax.set(xlabel="Federated client", ylabel="Unique training samples", xticks=x,
+           title="Identity-Exclusive Non-IID Client Allocation")
+    ax.legend(frameon=False)
+    ax.grid(axis="y", alpha=0.22)
+    fig.tight_layout()
+    fig.savefig(figures / "federated_client_distribution.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
-plt.tight_layout()
-plt.savefig('do_fmbs_lfw_faces.png', dpi=120, bbox_inches='tight')
-plt.close()
-print("    Saved: do_fmbs_lfw_faces.png")
+    print("[5/5] Saving Phase 1 provenance")
+    metadata = {
+        "phase": 1, "replay_id": os.environ.get("DO_FMBS_REPLAY_ID", "unspecified"),
+        "created_utc": datetime.now(timezone.utc).isoformat(), "python": sys.version, "platform": platform.platform(),
+        "seeds": {"global": 42, "face_split": FACE_SPLIT_SEED,
+                  "fingerprint_identity_base": FINGERPRINT_IDENTITY_SEED,
+                  "fingerprint_impression_base": FINGERPRINT_IMPRESSION_SEED,
+                  "client_partition": CLIENT_PARTITION_SEED},
+        "face": {"source": "Labeled Faces in the Wild via scikit-learn",
+                 "identities": int(len(lfw.target_names)), "total": int(len(face_images)),
+                 "train": int(len(face_train)), "calibration": int(len(face_cal)), "test": int(len(face_test)),
+                 "image_shape": list(face_images.shape[1:]), "scaler_fit": "training partition only"},
+        "fingerprint": {"source": "locally generated identity-persistent synthetic fingerprints (not FVC)",
+                        "identities": args.fingerprint_identities,
+                        "impressions_per_identity": args.fingerprint_impressions, "total": int(len(finger_images)),
+                        "train": int(len(finger_train)), "calibration": int(len(finger_cal)), "test": int(len(finger_test)),
+                        "split_protocol": "impressions 0-4 train, 5 calibration, 6-7 final test",
+                        "scaler_fit": "training partition only", "quality_gate": diagnostics},
+        "runtime_seconds": time.perf_counter() - started,
+    }
+    json_dump(output / "phase1_metadata.json", metadata)
+    print(f"Phase 1 complete in {metadata['runtime_seconds']:.2f}s")
+    print(f"Fingerprint quality gate: PASS; NN={diagnostics['nearest_neighbour_identity_accuracy']:.3f}")
+    return 0
 
-# Visualize fingerprint samples
-fig, axes = plt.subplots(3, 4, figsize=(14, 10))
-fig.suptitle('DO-FMBS Fingerprint Modality: FVC-style Images\nEach row = same finger, different impressions',
-             fontsize=12, fontweight='bold')
 
-for row in range(3):
-    for col in range(4):
-        idx = row * 8 + col
-        axes[row, col].imshow(images[idx], cmap='gray')
-        axes[row, col].set_title(f'Finger {row+1}, Scan {col+1}', fontsize=9)
-        axes[row, col].axis('off')
-
-plt.tight_layout()
-plt.savefig('do_fmbs_fingerprints.png', dpi=120, bbox_inches='tight')
-plt.close()
-print("    Saved: do_fmbs_fingerprints.png")
-
-# Visualize client distribution
-client_labels = [f'Client {c["client_id"]}' for c in clients]
-face_counts = [c['face_samples'] for c in clients]
-finger_counts = [c['finger_samples'] for c in clients]
-
-x = np.arange(len(clients))
-width = 0.35
-
-fig, ax = plt.subplots(figsize=(11, 6))
-b1 = ax.bar(x - width/2, face_counts, width, label='Face Samples', color='steelblue', alpha=0.85)
-b2 = ax.bar(x + width/2, finger_counts, width, label='Fingerprint Samples', color='darkorange', alpha=0.85)
-
-ax.set_xlabel('Federated Client', fontsize=12)
-ax.set_ylabel('Training Samples', fontsize=12)
-ax.set_title('DO-FMBS: Non-IID Federated Data Distribution\nEach client owns different identity subsets',
-             fontsize=12, fontweight='bold')
-ax.set_xticks(x)
-ax.set_xticklabels(client_labels)
-ax.legend(fontsize=11)
-ax.grid(axis='y', alpha=0.3)
-
-for bars in [b1, b2]:
-    for bar in bars:
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., h + 0.5, str(int(h)), ha='center', va='bottom', fontsize=9)
-
-plt.tight_layout()
-plt.savefig('do_fmbs_client_distribution.png', dpi=120, bbox_inches='tight')
-plt.close()
-print("    Saved: do_fmbs_client_distribution.png")
-
-# ============================================================================
-# 5. SUMMARY
-# ============================================================================
-print("\n" + "=" * 60)
-print("  DO-FMBS PHASE 1 COMPLETE!")
-print("=" * 60)
-
-print("\n DATA SUMMARY:")
-print(f"  Face Modality (LFW):")
-print(f"    Identities: {n_face_classes}")
-print(f"    Train/Test: {X_train_face.shape[0]} / {X_test_face.shape[0]}")
-print(f"    Image size: {image_shape_face[0]} x {image_shape_face[1]} pixels")
-print(f"\n  Fingerprint Modality (FVC-synthetic):")
-print(f"    Identities: {n_finger_classes}")
-print(f"    Train/Test: {X_train_finger.shape[0]} / {X_test_finger.shape[0]}")
-print(f"    Image size: {height} x {width} pixels")
-print(f"\n  Federated Clients (Non-IID):")
-for c in clients:
-    print(f"    Client {c['client_id']}: face={c['face_samples']} | fingerprint={c['finger_samples']} | total={c['total_samples']}")
-
-print("\n SAVED FILES:")
-print("  - do_fmbs_data/face_data.npz")
-print("  - do_fmbs_data/fingerprint_data.npz")
-print("  - do_fmbs_data/clients/client_*.npz")
-print("  - do_fmbs_lfw_faces.png")
-print("  - do_fmbs_fingerprints.png")
-print("  - do_fmbs_client_distribution.png")
-
-print("\n NEXT STEP: Run phase2_federated_learning.py")
-print("=" * 60)
+if __name__ == "__main__":
+    raise SystemExit(main())

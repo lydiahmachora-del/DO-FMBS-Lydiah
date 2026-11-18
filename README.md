@@ -1,176 +1,122 @@
-# DO-FMBS: Privacy-Preserving Dynamic Optimization for Federated Multimodal Biometrics
+# DO-FMBS: Dynamic Optimization for Federated Multimodal Biometric Security
 
-Master's thesis implementation for Jaramogi Oginga Odinga University of Science and Technology.
+Master's research implementation for Jaramogi Oginga Odinga University of Science and Technology.
 
-**Researcher:** Lydiah Moraa Machora (I152/P/9515/23)
+Researcher: Lydiah Moraa Machora (I152/P/9515/23)  
+Supervisors: Dr. Richard Omollo, PhD; Dr. Gonza Omoro, PhD  
+Year: 2026
 
-**Supervisors:** Dr. Richard Omollo, PhD; Dr. Gonza Omoro, PhD
+## Scientific scope
 
-**Year:** 2026
+DO-FMBS is an experimental, six-phase federated biometric pipeline with two independent identity spaces:
 
-## Project structure
+- face classification uses the public Labeled Faces in the Wild subset supplied by scikit-learn;
+- fingerprint classification uses generated identity-persistent ridge templates with eight impressions per identity;
+- the branches are trained together for computational convenience but are not person-level multimodal pairs;
+- evasion and robustness experiments apply to the face branch only;
+- Gaussian gradient noise is DP-inspired regularization, not formal differential privacy and carries no epsilon/delta guarantee;
+- Phase 6 is a controlled dynamic-optimization simulation, not evidence from a production deployment.
 
-DO-FMBS combines six reproducible phases:
+The corrected fingerprint generator creates one stable ridge template per synthetic identity and derives impressions through bounded rotation/translation, elastic deformation, pressure variation, blur, sensor noise and partial contact. Phase 1 refuses to continue unless the same-identity/different-identity quality gate passes.
 
-| Phase | Function | Terminal entry point |
+## Authoritative replay
+
+The accepted replay is `final_scientific_replay_20260907`. Its only authoritative numerical index is:
+
+`do_fmbs_data/final_evidence_manifest.json`
+
+That manifest records the replay identifier, parameters, seeds, environment, phase runtimes, independent audit result, final metrics, scope statements and SHA-256 hashes for 68 evidence artifacts. Chapter Four and the Streamlit application validate and read this manifest; they do not read legacy root-level result files.
+
+Headline final-test results are:
+
+| Task | Face | Fingerprint |
+|---|---:|---:|
+| Closed-set classification accuracy | 272/454 = 59.91% | 191/200 = 95.50% |
+| Claimed-identity FAR | 3129/27694 = 11.298% | 311/19800 = 1.571% |
+| Claimed-identity FRR | 46/454 = 10.132% | 5/200 = 2.500% |
+| Claimed-identity TAR | 89.868% | 97.500% |
+| Verification ROC AUC | 0.9589 | 0.9948 |
+
+Verification thresholds were selected at the equal-error operating point on calibration data and frozen before test evaluation. Every test sample produces one genuine claim and one claim against every incorrect enrolled identity. Classification accuracy and verification FAR/FRR are intentionally reported as different tasks.
+
+## Pipeline
+
+| Phase | Implementation | Main evidence |
 |---|---|---|
-| 1 | Prepare LFW face data and generated fingerprint data | `python phase1_data_preparation.py` |
-| 2 | Train the federated multimodal baseline | `python phase2_federated_learning.py` |
-| 3 | Apply evasion, membership-inference, and poisoning attacks | `python phase3_adversarial_attacks.py` |
-| 4 | Train and compare defense configurations | `python phase4_defense_mechanisms.py` |
-| 5 | Validate classification and robustness results | `python phase5_model_validation.py` |
-| 6 | Estimate the constrained dynamic equation and optimize each round | `python phase6_constrained_dynamic_optimization.py` |
+| 1. Data preparation | `phase1_data_preparation.py` | split indices, train-only scalers, persistent fingerprints, quality gate |
+| 2. Federated learning | `phase2_federated_learning.py` | exact five-client class-exclusive non-IID partitions, FedAvg history |
+| 3. Attack simulation | `phase3_adversarial_attacks.py` | face-only FGSM/PGD and membership evidence; poisoning simulation |
+| 4. Defenses | `phase4_defense_mechanisms.py` | baseline, DP-inspired, ART and combined dual-loss configurations |
+| 5. Validation | `phase5_model_validation.py` | per-modality classification, verification, confidence intervals and robustness |
+| 6. Dynamic optimization | `phase6_constrained_dynamic_optimization.py` | constrained coefficients, diagnostics and round-specific control schedule |
 
-The interactive application is started with:
+Both heads contribute to Phase 4 optimization:
+
+```text
+combined_loss = 0.5 * face_loss + 0.5 * fingerprint_loss
+```
+
+The replay also records nonzero fingerprint-head gradient norms so accidental removal of the fingerprint loss fails validation.
+
+## Reproduce and verify
+
+Activate the repository virtual environment first. On PowerShell:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+python scripts\run_isolated_instrumented_pipeline.py
+python scripts\verify_replay_evidence.py --run-dir runtime_recording\final_scientific_replay_20260907
+python scripts\build_final_evidence_manifest.py --run-dir runtime_recording\final_scientific_replay_20260907
+python -m unittest discover -s tests -v
+```
+
+The isolated runner copies the phase code into a replay directory and writes phase-specific logs, commands, exit codes and timings. It does not mix those results with older root-level artifacts.
+
+## Dashboard
+
+Start the manifest-backed dashboard with:
 
 ```powershell
 streamlit run app.py
 ```
 
-## Current experimental model comparison
+The dashboard separates data provenance, federated training, classification, claimed-identity verification, face-only adversarial results, defenses, dynamic optimization and artifact traceability.
 
-The table below is read from `do_fmbs_data/final_results.pkl`, generated on 8 August 2026. “Privacy score” is the experiment's attack-resistance score, `1 − ASR`; it is not a formal differential-privacy guarantee.
+## Chapter Four
 
-| Model | Face accuracy | Attack success rate | Attack-resistance score |
-|---|---:|---:|---:|
-| Baseline | 57.19% | 42.86% | 57.14% |
-| Differential privacy/noise | 51.07% | 52.38% | 47.62% |
-| Adversarial training | 59.67% | 53.85% | 46.15% |
-| DO-FMBS combined defense | 58.84% | 58.62% | 41.38% |
-
-These figures describe this saved run and should be interpreted together with the Phase 3–5 methods and sample sizes. They are not used as substitutes for regression coefficients.
-
-## Constrained dynamic model
-
-Phase 6 fits the round-ahead equation:
-
-$$
-\widehat{Y}_{t+1}=B_0+B_{AI}AI_t+B_{PA}PA_t+B_{DM}DM_t+B_{GS}GS_t.
-$$
-
-The variables have one fixed operational meaning throughout estimation and optimization:
-
-| Variable | Definition | Role | Domain |
-|---|---|---|---:|
-| $AI_t$ | Adversarial-input pressure, normalized as `epsilon / 0.30` | Measured threat state | 0–1 |
-| $PA_t$ | `2 × max(0, membership-attack accuracy − 0.50)` | Measured privacy-threat state | fitted: 0–0.50 |
-| $DM_t$ | Continuous defense intensity | Optimized control | 0–1 |
-| $GS_t$ | `(participating clients − 1) / 4` | Optimized control | 0–1 |
-| $Y_{t+1}$ | Simulated next-round FMBS efficiency score | Response | 0–1 |
-
-“Dynamic” has a precise meaning here: the system measures $AI_t$ and $PA_t$ before a federated round, chooses $DM_t$ and $GS_t$, predicts $Y_{t+1}$, and repeats the optimization when the threat state changes in the next round.
-
-### Estimated coefficients
-
-The reproducible seed-42 design contains 700 balanced observations (`7 AI × 5 PA × 4 DM × 5 GS`). Its declared simulation ground truth is `(0.40, −0.18, −0.22, +0.26, +0.16)`, with seeded random error added before fitting. Sign-constrained least squares then recovers the values below. It enforces $B_{AI}\leq0$, $B_{PA}\leq0$, $B_{DM}\geq0$, and $B_{GS}\geq0$ during estimation; the ordering $B_{PA}\leq B_{AI}$ is evaluated separately rather than forced.
-
-| Parameter | Estimate | Standard error | 95% confidence interval | Interpretation for a +1.0 change |
-|---|---:|---:|---:|---|
-| $B_0$ | 0.4007 | 0.0025 | [0.3959, 0.4056] | Reference performance when all normalized predictors are zero |
-| $B_{AI}$ | −0.1821 | 0.0028 | [−0.1876, −0.1767] | Higher adversarial pressure lowers predicted performance |
-| $B_{PA}$ | −0.2273 | 0.0050 | [−0.2372, −0.2175] | Higher privacy-attack pressure lowers predicted performance |
-| $B_{DM}$ | +0.2614 | 0.0025 | [0.2565, 0.2663] | Stronger defense raises predicted performance |
-| $B_{GS}$ | +0.1594 | 0.0026 | [0.1543, 0.1646] | Greater client participation raises predicted performance |
-
-The fitted equation is therefore:
-
-$$
-\widehat{Y}_{t+1}=0.4007-0.1821AI_t-0.2273PA_t+0.2614DM_t+0.1594GS_t.
-$$
-
-### Fit and constraint evidence
-
-| Check | Result | Acceptance gate | Decision |
-|---|---:|---:|---|
-| $R^2$ | 0.9681 | ≥ 0.90 | Pass |
-| Adjusted $R^2$ | 0.9679 | ≥ 0.90 | Pass |
-| Five-fold constrained cross-validation $R^2$ | 0.9673 | ≥ 0.89 | Pass |
-| RMSE | 0.0245 | ≤ 0.06 | Pass |
-| Maximum VIF | 1.0000 | < 2.0 | Pass |
-| Maximum fitted-constraint violation | 0.0000 | ≤ numerical tolerance | Pass |
-
-All declared coefficient relations pass. The independently evaluated ordering $B_{PA}\leq B_{AI}$ passes because `−0.2273 ≤ −0.1821`. Full left/right values, relationship type, numerical slack, and decisions are saved in `constraint_checks.csv`. No fitted sign constraint is active, and the constrained estimates equal unconstrained OLS in this run; the reported classical standard errors and intervals therefore refer to that common interior solution.
-
-These diagnostics verify coefficient recovery, arithmetic, and controller behavior within the declared controlled simulation. Operational deployment still requires calibration and external validation on representative measurements.
-
-## Operating ranges
-
-The following values are project engineering gates for the Phase 6 simulation, not universal security standards:
-
-| Variable | Preferred | Managed | Critical but modeled | True out-of-domain | Required response |
-|---|---|---|---|---|---|
-| AI | 0–0.167 | >0.167–0.333 | >0.333–1.000 | >1.000 (`epsilon > 0.30`) | Increase controls in the critical band; reject without prediction outside the fitted domain |
-| PA | 0–0.20 | >0.20–0.40 | >0.40–0.50 | >0.50 | Escalate leakage investigation; reject without prediction outside the fitted domain |
-| DM | Selected to meet Y ≥0.70 | Selected to meet Y ≥0.60 | DM=1 when target is infeasible | <0 or >1 | Apply mapped defense settings or reject invalid input |
-| GS | 0.75–1.00 (4–5 clients) | 0.50 (3 clients) | 0–0.25 (1–2 clients, not deployable) | <0 or >1 | Require at least three clients |
-| Y | ≥0.70 | 0.60–<0.70 | <0.60 | <0 or >1 | Reject or defer below 0.60 |
-
-The stress test demonstrates both cases. At modeled `AI=0.6667` and `PA=0.50`, maximum `DM=1.0` and `GS=1.0` predict only `Y=0.5865`, so deployment is rejected or deferred. At `epsilon=0.35` and `PA=0.60`, the state is outside the fitted domain; the code returns no prediction and rejects it.
-
-## Federated optimization values
-
-For each round, Phase 6 searches `DM = 0.00, 0.05, …, 1.00` and three to five deployable active clients (`GS = 0.50, 0.75, 1.00`). It minimizes:
-
-$$
-J_t=0.60DM_t^2+0.40GS_t^2+0.15(DM_t-DM_{t-1})^2+0.10(GS_t-GS_{t-1})^2
-$$
-
-subject to:
-
-$$
-\widehat{Y}_{t+1}\geq0.60,\quad 0\leq DM_t\leq1,\quad GS_t\in\{0.50,0.75,1.00\}.
-$$
-
-The first two terms limit defense and aggregation resource use; the last two discourage abrupt configuration changes. The controller first seeks preferred `Y ≥ 0.70`, then minimum `Y ≥ 0.60`. If neither is feasible, it reports `maximum_controls_target_unmet` and rejects or defers the round.
-
-The continuous defense setting is operationally mapped as `adversarial fraction = 0.50 × DM`, `training epsilon = 0.05 × DM`, and `gradient-noise standard deviation = 0.0003 × DM`. At `DM=1`, these match the combined Phase 4 settings. This mapping is a controller policy and does not constitute a formal differential-privacy guarantee.
-
-The distinction between optimized and fixed federated values is:
-
-| Value | Current setting | Phase 6 treatment |
-|---|---:|---|
-| Defense intensity | 0.00–1.00 in 0.05 steps | Optimized each round |
-| Participating clients | 3, 4, or 5 | Optimized each round |
-| Total available clients | 5 | Fixed |
-| Federated rounds | 12 | Fixed from the saved Phase 2 run |
-| Local epochs | 2 per round | Fixed from the saved Phase 2 run |
-| Batch size | 64 | Fixed from the saved Phase 2 run |
-| Adam learning rate | 0.001 | Fixed in `phase2_federated_learning.py` |
-
-Therefore, Phase 6 is a defense-and-participation optimizer; it does not claim to optimize the learning rate, local epochs, batch size, or stopping round.
-
-A sensitivity check repeats the managed state `AI=0.3333, PA=0.30` under three cost policies. The balanced policy selects `DM=0.80` with four clients; making defense more expensive selects `DM=0.65` with five clients; making participation more expensive selects `DM=1.00` with three clients. All three reach `Y ≥ 0.60`. This shows that cost weights affect resource allocation and are declared policy choices, not coefficients learned from the data.
-
-## Evidence artifacts
-
-Running Phase 6 writes only to `simulation_evidence/constrained_dynamic_model/`:
-
-- `model_fit.json` — equation, coefficients, diagnostics, estimator status, and seed
-- `coefficient_estimates.csv` — estimates, standard errors, p-values, and confidence intervals
-- `constraint_checks.csv` — every inequality, its operands, slack, and decision
-- `simulation_observations.csv` — all 700 estimation observations
-- `dynamic_optimization_schedule.csv` — twelve round-specific controller decisions
-- `cost_weight_sensitivity.csv` — control choices under three resource-cost policies
-- `acceptance_ranges.csv` — ideal, managed, and outside-range policies
-- `stress_test_scenarios.csv` — feasible and rejected deployment examples
-
-Run the automated verification with:
+Generate and validate the final chapter with:
 
 ```powershell
-python -m unittest tests.test_constrained_dynamic_model -v
+python scripts\generate_chapter_four_report.py
 ```
 
-Professional documentation is generated from the same artifacts:
+Outputs:
 
-- [Word report](docs/constrained_dynamic_model/DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.docx)
-- [PDF report](docs/constrained_dynamic_model/DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.pdf)
-- [Readable Markdown report](docs/constrained_dynamic_model/DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.md)
+- `docs/chapter_four/CHAPTER_FOUR_MODEL_DEVELOPMENT_IMPLEMENTATION_AND_VALIDATION.docx`
+- `docs/chapter_four/CHAPTER_FOUR_MODEL_DEVELOPMENT_IMPLEMENTATION_AND_VALIDATION.pdf`
+- `docs/chapter_four/CHAPTER_FOUR_MODEL_DEVELOPMENT_IMPLEMENTATION_AND_VALIDATION.md`
+- `docs/chapter_four/chapter4_evidence_map.json`
+- `docs/chapter_four/CHAPTER_FOUR_GENERATION_MANIFEST.json`
 
-Regenerate all three with `python scripts/generate_constrained_dynamic_report.py`.
+The generator verifies every source hash, section presence, caption sequence, reproduced metric, table/figure count and rendered-page text before declaring success.
+
+## Dynamic optimization
+
+Phase 6 fits the constrained round-ahead model
+
+```text
+Y_(t+1) = B0 + B_AI*AI_t + B_PA*PA_t + B_DM*DM_t + B_GS*GS_t
+```
+
+where AI and PA are measured threat states, while DM and GS are optimized defense and client-participation controls. In the accepted seeded simulation, R-squared is 0.9681, adjusted R-squared is 0.9679 and cross-validated R-squared is 0.9673. All declared coefficient constraints pass. These diagnostics validate the controlled simulation only.
+
+## Historical artifacts
+
+Older result pickles, figures, reports and ancillary evaluators remain in the repository to preserve prior work. They are non-authoritative and may reflect superseded protocols, including per-impression fingerprint labels or random verification pairing. Do not quote them as final findings. The authoritative manifest, replay audit, current dashboard and current Chapter Four are the synchronized evidence chain.
 
 ## Requirements
 
-- Python 3.9–3.11 (3.10 recommended)
+- Python 3.10 recommended
 - 8 GB RAM minimum; 16 GB recommended
-- CPU execution is supported; a compatible GPU is optional for training phases
-- Install dependencies with `pip install -r requirements_app.txt`
+- CPU execution is supported; a compatible GPU is optional
+- install dependencies with `pip install -r requirements_app.txt`

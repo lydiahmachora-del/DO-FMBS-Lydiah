@@ -342,8 +342,12 @@ def optimize_controls(fit: FitResult, ai: float, pa: float, previous_dm: float,
 
 def dynamic_schedule(fit: FitResult) -> list[dict]:
     """Run a 12-round dynamic controller under changing threat pressure."""
-    epsilon_path = [0.00, 0.01, 0.05, 0.10, 0.15, 0.20, 0.10, 0.05, 0.01, 0.00, 0.05, 0.10]
-    pa_path = [0.02, 0.02, 0.05, 0.10, 0.20, 0.40, 0.30, 0.15, 0.08, 0.02, 0.10, 0.20]
+    # The 12th round explicitly exercises the maximum fitted attack intensity
+    # (epsilon=0.30, AI=1.00).  Its PA=0.10 remains inside the fitted domain,
+    # allowing the controller to demonstrate its highest in-domain response
+    # rather than silently omitting the upper attack level from the schedule.
+    epsilon_path = [0.00, 0.01, 0.05, 0.10, 0.15, 0.20, 0.10, 0.05, 0.01, 0.00, 0.05, 0.30]
+    pa_path = [0.02, 0.02, 0.05, 0.10, 0.20, 0.40, 0.30, 0.15, 0.08, 0.02, 0.10, 0.10]
     previous_dm, previous_gs = 0.30, gs_from_clients(4)
     rows = []
     for round_number, (epsilon, pa) in enumerate(zip(epsilon_path, pa_path), 1):
