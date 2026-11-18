@@ -87,6 +87,10 @@ class ConstrainedDynamicModelTests(unittest.TestCase):
         self.assertEqual(len(rows), 12)
         self.assertEqual([row["round"] for row in rows], list(range(1,13)))
         self.assertGreater(len({row["DM"] for row in rows}), 1)
+        self.assertEqual(rows[-1]["epsilon"], 0.30)
+        self.assertEqual(rows[-1]["AI"], 1.0)
+        self.assertEqual(rows[-1]["deployment_decision"], "accept")
+        self.assertGreaterEqual(rows[-1]["predicted_Y"], TARGET_Y)
 
     def test_ranges_cover_all_variables(self):
         self.assertEqual({row["variable"] for row in acceptance_ranges()}, {"AI","PA","DM","GS","Y"})

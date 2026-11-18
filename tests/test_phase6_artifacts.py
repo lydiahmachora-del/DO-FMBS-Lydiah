@@ -62,7 +62,8 @@ class Phase6ArtifactTests(unittest.TestCase):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertNotIn("-abs(results.get", source)
         self.assertNotIn("0.281,", source)
-        self.assertIn("load_dynamic_model_results", source)
+        self.assertIn("final_evidence_manifest.json", source)
+        self.assertIn("dynamic_optimization", source)
 
     def test_professional_reports_exist(self):
         markdown = REPORTS / "DO_FMBS_CONSTRAINED_DYNAMIC_MODEL_REPORT.md"

@@ -1,530 +1,223 @@
+"""Phase 3: scoped attacks against the trained DO-FMBS baseline.
+
+FGSM and PGD perturb only the face branch.  This phase does not claim evidence
+of fingerprint adversarial robustness.
 """
-DO-FMBS Research Project - Phase 3: Adversarial Attack Simulation
-Privacy-Preservation Model for Federated Multimodal Biometric System
+from __future__ import annotations
 
-Researcher: Lydiah Moraa Machora | Reg No: I152/P/9515/23
-University: Jaramogi Oginga Odinga University of Science and Technology
-
-This script:
-1. Loads the baseline model from Phase 2
-2. Generates adversarial examples (FGSM, PGD)
-3. Evaluates model vulnerability
-4. Measures attack success rates
-"""
-
-import tensorflow as tf
-import numpy as np
-import matplotlib.pyplot as plt
+import argparse
 import os
 import pickle
-import argparse
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-parser = argparse.ArgumentParser(description="Run Phase 3 attack simulations.")
-parser.add_argument("--epsilon", type=float, default=0.10)
-parser.add_argument("--membership-threshold", type=float, default=0.70)
-parser.add_argument("--poison-rate", type=float, default=0.10)
-parser.add_argument("--poison-epochs", type=int, default=3)
-args = parser.parse_args()
+import matplotlib
 
-# Suppress warnings including absl
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0=all, 1=info, 2=warning, 3=error
-import logging
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
-logging.getLogger('absl').setLevel(logging.ERROR)
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import roc_auc_score
 
-# Set random seeds
-tf.random.set_seed(42)
-np.random.seed(42)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+from do_fmbs_core import compile_dual_branch_model, json_dump, modality_probabilities, set_global_determinism
 
-print("=" * 60)
-print("DO-FMBS Phase 3: Adversarial Attack Simulation")
-print("=" * 60)
 
-# ============================================================================
-# 1. LOAD THE BASELINE MODEL
-# ============================================================================
-print("\n[1/5] Loading Baseline Model...")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=Path("do_fmbs_data"))
+    parser.add_argument("--epsilons", default="0.01,0.05,0.10,0.20,0.30")
+    parser.add_argument("--pgd-iterations", type=int, default=10)
+    parser.add_argument("--poison-rate", type=float, default=0.10)
+    parser.add_argument("--poison-epochs", type=int, default=3)
+    parser.add_argument("--max-test-samples", type=int, default=0)
+    return parser.parse_args()
 
-# Load face test data
-face_data = np.load('do_fmbs_data/face_data.npz', allow_pickle=True)
-X_test_face = face_data['X_test']
-y_test_face = face_data['y_test']
-X_train_face = face_data['X_train']
-y_train_face = face_data['y_train']
-n_face_features = int(face_data['n_features'])
-n_face_classes = int(face_data['n_classes'])
 
-# Load fingerprint test data
-finger_data = np.load('do_fmbs_data/fingerprint_data.npz', allow_pickle=True)
-X_test_finger = finger_data['X_test']
-y_test_finger = finger_data['y_test']
-X_train_finger = finger_data['X_train']
-y_train_finger = finger_data['y_train']
-n_finger_features = int(finger_data['n_features'])
-n_finger_classes = int(finger_data['n_classes'])
+def output_tensor(outputs, name: str, index: int):
+    return outputs[name] if isinstance(outputs, dict) else outputs[index]
 
-# Load the model
-model = tf.keras.models.load_model('do_fmbs_data/baseline_model.keras')
-print("    Model loaded successfully")
 
-# Prepare test data (matching pairs)
-n_samples = min(len(X_test_face), len(X_test_finger), 100)
-X_face_test = X_test_face[:n_samples].astype(np.float32)
-X_finger_test = X_test_finger[:n_samples].astype(np.float32)
-y_face_test = y_test_face[:n_samples]
-y_finger_test = y_test_finger[:n_samples]
+def fgsm_face(model, face, finger, labels, epsilon: float):
+    import tensorflow as tf
 
-n_train_attack = min(len(X_train_face), len(X_train_finger), 200)
-X_face_train_attack = X_train_face[:n_train_attack].astype(np.float32)
-X_finger_train_attack = X_train_finger[:n_train_attack].astype(np.float32)
-y_face_train_attack = y_train_face[:n_train_attack]
-y_finger_train_attack = y_train_finger[:n_train_attack]
-
-print(f"    Test samples: {n_samples}")
-print(f"    Face features: {n_face_features}")
-print(f"    Fingerprint features: {n_finger_features}")
-
-# ============================================================================
-# 2. BASELINE ACCURACY (BEFORE ATTACK)
-# ============================================================================
-print("\n[2/5] Baseline Accuracy (Before Attacks)...")
-
-baseline_results = model.evaluate(
-    x={'face_input': X_face_test, 'finger_input': X_finger_test},
-    y={'face_output': y_face_test, 'finger_output': y_finger_test},
-    verbose=0
-)
-
-baseline_face_acc = baseline_results[3]
-baseline_finger_acc = baseline_results[4]
-
-print(f"    Face Accuracy: {baseline_face_acc:.4f} ({baseline_face_acc*100:.2f}%)")
-print(f"    Fingerprint Accuracy: {baseline_finger_acc:.4f} ({baseline_finger_acc*100:.2f}%)")
-
-# ============================================================================
-# 3. IMPLEMENT ADVERSARIAL ATTACKS
-# ============================================================================
-print("\n[3/5] Implementing Adversarial Attacks...")
-
-def fgsm_attack(model, face_input, finger_input, face_label, finger_label, epsilon=0.1):
-    """
-    Fast Gradient Sign Method (FGSM) Attack
-    Perturbs input in the direction of the gradient to increase loss
-    """
-    # Use only face modality for attack (simpler)
-    face_input_tensor = tf.convert_to_tensor(face_input.reshape(1, -1))
-    
+    face_tensor = tf.convert_to_tensor(face, tf.float32)
+    finger_tensor = tf.convert_to_tensor(finger, tf.float32)
     with tf.GradientTape() as tape:
-        tape.watch(face_input_tensor)
-        predictions = model({'face_input': face_input_tensor, 
-                            'finger_input': finger_input.reshape(1, -1)})
-        face_pred = predictions[0]
-        loss = tf.keras.losses.sparse_categorical_crossentropy([face_label], face_pred)
-    
-    # Get gradients
-    gradients = tape.gradient(loss, face_input_tensor)
-    
-    # Create perturbation
-    perturbation = epsilon * tf.sign(gradients)
-    
-    # Generate adversarial example
-    adversarial_face = face_input_tensor + perturbation
-    adversarial_face = tf.clip_by_value(adversarial_face, -3, 3)
-    
-    return adversarial_face.numpy().reshape(-1)
+        tape.watch(face_tensor)
+        outputs = model({"face_input": face_tensor, "finger_input": finger_tensor}, training=False)
+        loss = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
+            labels, output_tensor(outputs, "face_output", 0)
+        ))
+    gradient = tape.gradient(loss, face_tensor)
+    return tf.clip_by_value(face_tensor + epsilon * tf.sign(gradient), -6.0, 6.0)
 
-def pgd_attack(model, face_input, finger_input, face_label, finger_label, 
-               epsilon=0.1, alpha=0.01, iterations=10):
-    """
-    Projected Gradient Descent (PGD) Attack
-    Iterative version of FGSM - stronger attack
-    """
-    adversarial_face = face_input.copy()
-    
+
+def pgd_face(model, face, finger, labels, epsilon: float, iterations: int):
+    import tensorflow as tf
+
+    original = tf.convert_to_tensor(face, tf.float32)
+    adversarial = tf.identity(original)
+    alpha = epsilon / max(iterations // 2, 1)
+    finger_tensor = tf.convert_to_tensor(finger, tf.float32)
     for _ in range(iterations):
-        adversarial_tensor = tf.convert_to_tensor(adversarial_face.reshape(1, -1))
-        
         with tf.GradientTape() as tape:
-            tape.watch(adversarial_tensor)
-            predictions = model({'face_input': adversarial_tensor,
-                                'finger_input': finger_input.reshape(1, -1)})
-            face_pred = predictions[0]
-            loss = tf.keras.losses.sparse_categorical_crossentropy([face_label], face_pred)
-        
-        gradients = tape.gradient(loss, adversarial_tensor)
-        perturbation = alpha * tf.sign(gradients)
-        adversarial_face = adversarial_face + perturbation.numpy().reshape(-1)
-        
-        # Project back to epsilon ball
-        perturbation = adversarial_face - face_input
-        perturbation = np.clip(perturbation, -epsilon, epsilon)
-        adversarial_face = face_input + perturbation
-        adversarial_face = np.clip(adversarial_face, -3, 3)
-    
-    return adversarial_face
+            tape.watch(adversarial)
+            outputs = model({"face_input": adversarial, "finger_input": finger_tensor}, training=False)
+            loss = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
+                labels, output_tensor(outputs, "face_output", 0)
+            ))
+        gradient = tape.gradient(loss, adversarial)
+        adversarial = adversarial + alpha * tf.sign(gradient)
+        adversarial = tf.clip_by_value(adversarial, original - epsilon, original + epsilon)
+        adversarial = tf.clip_by_value(adversarial, -6.0, 6.0)
+    return adversarial
 
-def evaluate_attack(model, X_face, X_finger, y_face, y_finger, 
-                    attack_type='fgsm', epsilon=0.1):
-    """
-    Evaluate model under adversarial attack
-    """
-    correct_before = 0
-    correct_after = 0
-    success_count = 0
-    
-    for i in range(len(X_face)):
-        # Check original prediction
-        orig_pred = model.predict(
-            {'face_input': X_face[i:i+1], 'finger_input': X_finger[i:i+1]},
-            verbose=0
-        )
-        orig_face_pred = np.argmax(orig_pred[0])
-        
-        if orig_face_pred == y_face[i]:
-            correct_before += 1
-            
-            # Generate adversarial example
-            if attack_type == 'fgsm':
-                adv_face = fgsm_attack(model, X_face[i], X_finger[i], 
-                                        y_face[i], y_finger[i], epsilon)
-            else:  # pgd
-                adv_face = pgd_attack(model, X_face[i], X_finger[i],
-                                       y_face[i], y_finger[i], epsilon)
-            
-            # Test adversarial example
-            adv_pred = model.predict(
-                {'face_input': adv_face.reshape(1, -1), 
-                 'finger_input': X_finger[i:i+1]},
-                verbose=0
-            )
-            adv_face_pred = np.argmax(adv_pred[0])
-            
-            if adv_face_pred != y_face[i]:
-                correct_after += 1
-                success_count += 1
-    
-    attack_success_rate = success_count / correct_before if correct_before > 0 else 0
-    
+
+def face_probabilities(model, face, finger) -> np.ndarray:
+    outputs = model({"face_input": face, "finger_input": finger}, training=False)
+    return np.asarray(output_tensor(outputs, "face_output", 0))
+
+
+def evaluate_evasion(model, face, finger, labels, epsilons, pgd_iterations):
+    clean_prob = face_probabilities(model, face, finger)
+    clean_pred = np.argmax(clean_prob, axis=1)
+    eligible = clean_pred == labels
+    rows = []
+    for attack in ("FGSM", "PGD"):
+        for epsilon in epsilons:
+            if attack == "FGSM":
+                adversarial = fgsm_face(model, face, finger, labels, epsilon)
+            else:
+                adversarial = pgd_face(model, face, finger, labels, epsilon, pgd_iterations)
+            attacked_pred = np.argmax(face_probabilities(model, adversarial, finger), axis=1)
+            successes = int(np.count_nonzero(eligible & (attacked_pred != labels)))
+            rows.append({
+                "attack": attack, "modality": "face", "epsilon": float(epsilon),
+                "clean_correct": int(np.count_nonzero(eligible)),
+                "successful_attacks": successes,
+                "attack_success_rate": float(successes / max(np.count_nonzero(eligible), 1)),
+                "attacked_accuracy_all_samples": float(np.mean(attacked_pred == labels)),
+            })
+    return rows
+
+
+def membership_inference_face(model, train_face, calibration_face) -> dict[str, float | int | str]:
+    train_conf = np.max(modality_probabilities(model, "face", train_face), axis=1)
+    nonmember_conf = np.max(modality_probabilities(model, "face", calibration_face), axis=1)
+    n = min(len(train_conf), len(nonmember_conf))
+    rng = np.random.default_rng(42)
+    train_conf = rng.choice(train_conf, n, replace=False)
+    nonmember_conf = rng.choice(nonmember_conf, n, replace=False)
+    truth = np.concatenate([np.ones(n), np.zeros(n)])
+    score = np.concatenate([train_conf, nonmember_conf])
+    candidates = np.unique(score)
+    accuracies = [np.mean((score >= threshold) == truth) for threshold in candidates]
+    index = int(np.argmax(accuracies))
     return {
-        'correct_before': correct_before,
-        'correct_after': correct_after,
-        'success_count': success_count,
-        'attack_success_rate': attack_success_rate
+        "attack": "confidence-threshold membership inference", "modality": "face",
+        "members": n, "nonmembers": n, "selected_threshold": float(candidates[index]),
+        "attack_accuracy": float(accuracies[index]), "ROC_AUC": float(roc_auc_score(truth, score)),
+        "membership_advantage": float(max(0.0, 2.0 * accuracies[index] - 1.0)),
+        "threshold_selection_scope": "descriptive attack operating point on the Phase 3 attack set",
     }
 
-print("    Attack functions defined")
 
-def membership_inference_attack(model, X_member_face, X_member_finger, X_nonmember_face,
-                                X_nonmember_finger, threshold=0.70):
-    """
-    Confidence-threshold membership inference attack.
-    Samples with max prediction confidence above the threshold are inferred as
-    training members.
-    """
-    member_pred = model.predict(
-        {'face_input': X_member_face, 'finger_input': X_member_finger},
-        verbose=0
-    )[0]
-    nonmember_pred = model.predict(
-        {'face_input': X_nonmember_face, 'finger_input': X_nonmember_finger},
-        verbose=0
-    )[0]
+def poisoning_attack(model, face_x, face_y, finger_x, finger_y, face_test, face_test_y,
+                     finger_test, finger_test_y, rate: float, epochs: int) -> dict[str, object]:
+    import tensorflow as tf
 
-    member_conf = np.max(member_pred, axis=1)
-    nonmember_conf = np.max(nonmember_pred, axis=1)
-
-    true_labels = np.array([1] * len(member_conf) + [0] * len(nonmember_conf))
-    inferred = np.array(
-        list(member_conf >= threshold) + list(nonmember_conf >= threshold),
-        dtype=int
+    poisoned = compile_dual_branch_model(tf.keras.models.clone_model(model), learning_rate=5e-4)
+    poisoned.set_weights(model.get_weights())
+    n = max(len(face_y), len(finger_y))
+    face_order = np.resize(np.arange(len(face_y)), n)
+    finger_order = np.resize(np.arange(len(finger_y)), n)
+    py_face = face_y[face_order].copy()
+    py_finger = finger_y[finger_order].copy()
+    rng = np.random.default_rng(3301)
+    count = max(1, int(rate * n))
+    selected = rng.choice(n, count, replace=False)
+    py_face[selected] = (py_face[selected] + 1) % int(model.get_layer("face_output").units)
+    py_finger[selected] = (py_finger[selected] + 1) % int(model.get_layer("finger_output").units)
+    poisoned.fit(
+        {"face_input": face_x[face_order], "finger_input": finger_x[finger_order]},
+        {"face_output": py_face, "finger_output": py_finger},
+        epochs=epochs, batch_size=64, verbose=0,
     )
-
-    attack_accuracy = np.mean(inferred == true_labels)
-    true_member_detection = np.mean(member_conf >= threshold)
-    false_member_rate = np.mean(nonmember_conf >= threshold)
-    privacy_risk = max(0.0, attack_accuracy - 0.5) * 2
-
+    before_face = np.mean(np.argmax(modality_probabilities(model, "face", face_test), axis=1) == face_test_y)
+    after_face = np.mean(np.argmax(modality_probabilities(poisoned, "face", face_test), axis=1) == face_test_y)
+    before_finger = np.mean(np.argmax(modality_probabilities(model, "fingerprint", finger_test), axis=1) == finger_test_y)
+    after_finger = np.mean(np.argmax(modality_probabilities(poisoned, "fingerprint", finger_test), axis=1) == finger_test_y)
     return {
-        'attack': 'Membership Inference Attack',
-        'type': 'Inference Attack',
-        'threshold': float(threshold),
-        'attack_accuracy': float(attack_accuracy),
-        'true_member_detection_rate': float(true_member_detection),
-        'false_member_rate': float(false_member_rate),
-        'privacy_risk_score': float(privacy_risk),
-        'member_mean_confidence': float(np.mean(member_conf)),
-        'nonmember_mean_confidence': float(np.mean(nonmember_conf))
+        "attack": "central label-flipping poisoning simulation", "modality": "face and fingerprint labels",
+        "poison_rate": rate, "poisoned_synchronized_records": count, "epochs": epochs,
+        "face_accuracy_before": float(before_face), "face_accuracy_after": float(after_face),
+        "face_accuracy_drop": float(before_face - after_face),
+        "fingerprint_accuracy_before": float(before_finger), "fingerprint_accuracy_after": float(after_finger),
+        "fingerprint_accuracy_drop": float(before_finger - after_finger),
     }
 
-def model_poisoning_attack(model, X_face, X_finger, y_face, y_finger,
-                           X_eval_face, X_eval_finger, y_eval_face,
-                           poison_rate=0.10, epochs=3):
-    """
-    Model poisoning attack using label flipping on a subset of local training data.
-    The poisoned model is fine-tuned from the baseline and compared against the
-    clean baseline on the same evaluation split.
-    """
-    poison_rate = float(np.clip(poison_rate, 0.0, 0.5))
-    poisoned_model = tf.keras.models.clone_model(model)
-    poisoned_model.set_weights(model.get_weights())
-    poisoned_model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
-        loss={'face_output': 'sparse_categorical_crossentropy',
-              'finger_output': 'sparse_categorical_crossentropy'},
-        metrics={'face_output': ['accuracy'], 'finger_output': ['accuracy']}
+
+def main() -> int:
+    args = parse_args()
+    set_global_determinism()
+    started = time.perf_counter()
+    epsilons = sorted({float(value) for value in args.epsilons.split(",")})
+    import tensorflow as tf
+
+    with np.load(args.data_dir / "face_data.npz", allow_pickle=False) as face:
+        face_train, face_train_y = face["X_train"], face["y_train"]
+        face_cal = face["X_calibration"]
+        face_test, face_test_y = face["X_test"], face["y_test"]
+    with np.load(args.data_dir / "fingerprint_data.npz", allow_pickle=False) as finger:
+        finger_train, finger_train_y = finger["X_train"], finger["y_train"]
+        finger_test, finger_test_y = finger["X_test"], finger["y_test"]
+    model = tf.keras.models.load_model(args.data_dir / "baseline_model.keras")
+    limit = len(face_test) if args.max_test_samples <= 0 else min(args.max_test_samples, len(face_test))
+    face_attack = face_test[:limit].astype(np.float32)
+    face_attack_y = face_test_y[:limit]
+    finger_dim = int(model.get_layer("finger_input").input.shape[-1])
+    neutral_finger = np.zeros((limit, finger_dim), dtype=np.float32)
+
+    evasion = evaluate_evasion(
+        model, face_attack, neutral_finger, face_attack_y, epsilons, args.pgd_iterations
     )
-
-    clean_pred = model.predict(
-        {'face_input': X_eval_face, 'finger_input': X_eval_finger},
-        verbose=0
-    )[0]
-    clean_accuracy = float(np.mean(np.argmax(clean_pred, axis=1) == y_eval_face))
-
-    y_face_poisoned = np.array(y_face, copy=True)
-    y_finger_poisoned = np.array(y_finger, copy=True)
-    n_poison = max(1, int(len(y_face_poisoned) * poison_rate))
-    poison_indices = np.random.choice(len(y_face_poisoned), size=n_poison, replace=False)
-    y_face_poisoned[poison_indices] = (y_face_poisoned[poison_indices] + 1) % n_face_classes
-    y_finger_poisoned[poison_indices] = (y_finger_poisoned[poison_indices] + 1) % n_finger_classes
-
-    poisoned_model.fit(
-        x={'face_input': X_face, 'finger_input': X_finger},
-        y={'face_output': y_face_poisoned, 'finger_output': y_finger_poisoned},
-        epochs=epochs,
-        batch_size=32,
-        verbose=0
+    membership = membership_inference_face(model, face_train, face_cal)
+    poisoning = poisoning_attack(
+        model, face_train, face_train_y, finger_train, finger_train_y,
+        face_test, face_test_y, finger_test, finger_test_y, args.poison_rate, args.poison_epochs,
     )
-
-    poisoned_pred = poisoned_model.predict(
-        {'face_input': X_eval_face, 'finger_input': X_eval_finger},
-        verbose=0
-    )[0]
-    poisoned_accuracy = float(np.mean(np.argmax(poisoned_pred, axis=1) == y_eval_face))
-
-    return {
-        'attack': 'Label-Flipping Model Poisoning',
-        'type': 'Poisoning Attack',
-        'poison_rate': poison_rate,
-        'poisoned_samples': int(n_poison),
-        'clean_accuracy': clean_accuracy,
-        'poisoned_accuracy': poisoned_accuracy,
-        'accuracy_drop': float(clean_accuracy - poisoned_accuracy),
-        'attack_success_rate': float(max(0.0, clean_accuracy - poisoned_accuracy))
+    results = {
+        "phase": 3, "replay_id": os.environ.get("DO_FMBS_REPLAY_ID", "unspecified"),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "scope_statement": "FGSM and PGD perturb the face input only; no fingerprint evasion-robustness claim is made.",
+        "evasion": evasion, "membership_inference": membership, "label_flipping_poisoning": poisoning,
+        "parameters": {"epsilons": epsilons, "pgd_iterations": args.pgd_iterations,
+                       "poison_rate": args.poison_rate, "poison_epochs": args.poison_epochs,
+                       "face_attack_samples": limit},
+        "runtime_seconds": time.perf_counter() - started,
     }
+    json_dump(args.data_dir / "phase3_attack_results.json", results)
+    with (args.data_dir / "attack_results.pkl").open("wb") as stream:
+        pickle.dump(results, stream)
 
-# ============================================================================
-# 4. RUN ATTACKS WITH DIFFERENT EPSILON VALUES
-# ============================================================================
-print("\n[4/5] Running Adversarial Attacks...")
+    figures = args.data_dir / "figures"
+    figures.mkdir(exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.3, 5.0))
+    for attack, marker in (("FGSM", "o"), ("PGD", "s")):
+        rows = [row for row in evasion if row["attack"] == attack]
+        ax.plot([row["epsilon"] for row in rows], [100 * row["attack_success_rate"] for row in rows],
+                marker=marker, label=f"{attack}—face")
+    ax.set(xlabel="Perturbation bound (epsilon)", ylabel="Attack success rate (%)",
+           title="Face-Branch Adversarial Evasion")
+    ax.set_ylim(0, 100)
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.22)
+    fig.tight_layout()
+    fig.savefig(figures / "face_adversarial_attacks.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Phase 3 complete in {results['runtime_seconds']:.2f}s; attacks explicitly scoped by modality")
+    return 0
 
-epsilons = sorted(set([0.01, 0.05, 0.1, 0.2, 0.3, round(args.epsilon, 2)]))
-fgsm_results = []
-pgd_results = []
 
-print("\n    FGSM Attack Results:")
-print("    " + "-" * 50)
-print("    Epsilon | Attack Success Rate")
-print("    " + "-" * 50)
-
-for eps in epsilons:
-    result = evaluate_attack(model, X_face_test, X_finger_test, 
-                              y_face_test, y_finger_test, 
-                              attack_type='fgsm', epsilon=eps)
-    fgsm_results.append({'epsilon': eps, 'success_rate': result['attack_success_rate']})
-    print(f"    {eps:7.2f} | {result['attack_success_rate']*100:6.2f}%")
-
-print("\n    PGD Attack Results (10 iterations):")
-print("    " + "-" * 50)
-print("    Epsilon | Attack Success Rate")
-print("    " + "-" * 50)
-
-for eps in epsilons:
-    result = evaluate_attack(model, X_face_test, X_finger_test,
-                              y_face_test, y_finger_test,
-                              attack_type='pgd', epsilon=eps)
-    pgd_results.append({'epsilon': eps, 'success_rate': result['attack_success_rate']})
-    print(f"    {eps:7.2f} | {result['attack_success_rate']*100:6.2f}%")
-
-print("\n    Membership Inference Attack Results:")
-membership_results = membership_inference_attack(
-    model,
-    X_face_train_attack[:n_samples], X_finger_train_attack[:n_samples],
-    X_face_test, X_finger_test,
-    threshold=args.membership_threshold
-)
-print(f"    Attack Accuracy: {membership_results['attack_accuracy']*100:.2f}%")
-print(f"    Privacy Risk Score: {membership_results['privacy_risk_score']*100:.2f}%")
-
-print("\n    Model Poisoning Attack Results:")
-poisoning_results = model_poisoning_attack(
-    model,
-    X_face_train_attack, X_finger_train_attack, y_face_train_attack, y_finger_train_attack,
-    X_face_test, X_finger_test, y_face_test,
-    poison_rate=args.poison_rate,
-    epochs=args.poison_epochs
-)
-print(f"    Poison Rate: {poisoning_results['poison_rate']*100:.1f}%")
-print(f"    Accuracy Drop: {poisoning_results['accuracy_drop']*100:.2f}%")
-
-# ============================================================================
-# 5. VISUALIZE ATTACK RESULTS
-# ============================================================================
-print("\n[5/5] Visualizing Results...")
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# Plot FGSM results
-eps_values = [r['epsilon'] for r in fgsm_results]
-success_rates = [r['success_rate'] * 100 for r in fgsm_results]
-
-axes[0].plot(eps_values, success_rates, 'b-o', linewidth=2, markersize=8)
-axes[0].set_xlabel('Epsilon (Attack Strength)', fontsize=12)
-axes[0].set_ylabel('Attack Success Rate (%)', fontsize=12)
-axes[0].set_title('FGSM Attack: Face Recognition', fontsize=12, fontweight='bold')
-axes[0].grid(True, alpha=0.3)
-axes[0].set_ylim([0, 100])
-
-# Plot PGD results
-eps_values = [r['epsilon'] for r in pgd_results]
-success_rates = [r['success_rate'] * 100 for r in pgd_results]
-
-axes[1].plot(eps_values, success_rates, 'r-o', linewidth=2, markersize=8)
-axes[1].set_xlabel('Epsilon (Attack Strength)', fontsize=12)
-axes[1].set_ylabel('Attack Success Rate (%)', fontsize=12)
-axes[1].set_title('PGD Attack: Face Recognition', fontsize=12, fontweight='bold')
-axes[1].grid(True, alpha=0.3)
-axes[1].set_ylim([0, 100])
-
-plt.tight_layout()
-plt.savefig('do_fmbs_attack_results.png', dpi=120, bbox_inches='tight')
-plt.close()
-print("    Saved: do_fmbs_attack_results.png")
-
-fig_ext, axes_ext = plt.subplots(1, 2, figsize=(14, 5))
-
-inference_labels = ['Attack Accuracy', 'Privacy Risk', 'Member Detection', 'False Member Rate']
-inference_values = [
-    membership_results['attack_accuracy'] * 100,
-    membership_results['privacy_risk_score'] * 100,
-    membership_results['true_member_detection_rate'] * 100,
-    membership_results['false_member_rate'] * 100
-]
-axes_ext[0].bar(inference_labels, inference_values, color=['#2b6cb0', '#805ad5', '#38a169', '#dd6b20'])
-axes_ext[0].set_ylabel('Rate (%)')
-axes_ext[0].set_title('Membership Inference Attack', fontsize=12, fontweight='bold')
-axes_ext[0].set_ylim([0, 100])
-axes_ext[0].tick_params(axis='x', rotation=20)
-axes_ext[0].grid(True, axis='y', alpha=0.3)
-
-poison_labels = ['Clean Accuracy', 'Poisoned Accuracy', 'Accuracy Drop']
-poison_values = [
-    poisoning_results['clean_accuracy'] * 100,
-    poisoning_results['poisoned_accuracy'] * 100,
-    poisoning_results['accuracy_drop'] * 100
-]
-axes_ext[1].bar(poison_labels, poison_values, color=['#38a169', '#e53e3e', '#dd6b20'])
-axes_ext[1].set_ylabel('Accuracy / Drop (%)')
-axes_ext[1].set_title('Label-Flipping Model Poisoning', fontsize=12, fontweight='bold')
-axes_ext[1].set_ylim([0, max(10, max(poison_values) + 5)])
-axes_ext[1].tick_params(axis='x', rotation=15)
-axes_ext[1].grid(True, axis='y', alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('do_fmbs_attack_extended_results.png', dpi=120, bbox_inches='tight')
-plt.close()
-print("    Saved: do_fmbs_attack_extended_results.png")
-
-# ============================================================================
-# 6. VISUALIZE ADVERSARIAL EXAMPLES
-# ============================================================================
-print("\n[6/5] Visualizing Adversarial Examples...")
-
-# Select a sample
-sample_idx = 0
-sample_face = X_face_test[sample_idx].reshape(1, -1)
-sample_finger = X_finger_test[sample_idx].reshape(1, -1)
-sample_face_label = y_face_test[sample_idx]
-
-# Generate adversarial example
-adversarial_face = fgsm_attack(model, X_face_test[sample_idx], 
-                                X_finger_test[sample_idx],
-                                y_face_test[sample_idx], 
-                                y_finger_test[sample_idx], 
-                                epsilon=0.1)
-
-# Get predictions
-orig_pred = model.predict({'face_input': sample_face, 'finger_input': sample_finger}, verbose=0)
-adv_pred = model.predict({'face_input': adversarial_face.reshape(1, -1), 
-                          'finger_input': sample_finger}, verbose=0)
-
-orig_class = np.argmax(orig_pred[0])
-adv_class = np.argmax(adv_pred[0])
-
-print(f"\n    Sample #{sample_idx}")
-print(f"    Original face class: {sample_face_label}")
-print(f"    Predicted class (original): {orig_class}")
-print(f"    Predicted class (adversarial): {adv_class}")
-
-# Visualize original vs adversarial (if we had image shape info)
-# Note: We're working with flattened features, so we can't easily visualize
-print("\n    Note: Adversarial examples are in feature space (flattened)")
-print("    In production, these would be imperceptible perturbations to images")
-
-# ============================================================================
-# 7. SAVE RESULTS
-# ============================================================================
-print("\n[7/5] Saving Attack Results...")
-
-attack_results = {
-    'baseline_face_accuracy': float(baseline_face_acc),
-    'baseline_finger_accuracy': float(baseline_finger_acc),
-    'fgsm_results': fgsm_results,
-    'pgd_results': pgd_results,
-    'membership_inference': membership_results,
-    'model_poisoning': poisoning_results,
-    'epsilons': epsilons,
-    'attack_manifest': [
-        {'type': 'Evasion Attack', 'attacks': ['FGSM', 'PGD'], 'status': 'Applied'},
-        {'type': 'Inference Attack', 'attacks': ['Membership Inference Attack'], 'status': 'Applied'},
-        {'type': 'Poisoning Attack', 'attacks': ['Label-Flipping Model Poisoning'], 'status': 'Applied'}
-    ],
-    'parameters': {
-        'selected_epsilon': args.epsilon,
-        'membership_threshold': args.membership_threshold,
-        'poison_rate': args.poison_rate,
-        'poison_epochs': args.poison_epochs
-    }
-}
-
-with open('do_fmbs_data/attack_results.pkl', 'wb') as f:
-    pickle.dump(attack_results, f)
-print("    Saved: do_fmbs_data/attack_results.pkl")
-
-# ============================================================================
-# 8. FINAL SUMMARY
-# ============================================================================
-print("\n" + "=" * 60)
-print("  DO-FMBS PHASE 3 COMPLETE!")
-print("=" * 60)
-
-print("\n ATTACK RESULTS SUMMARY:")
-print(f"  Baseline Face Accuracy: {baseline_face_acc:.2%}")
-print(f"\n  FGSM Attack (epsilon=0.1):")
-fgsm_eps01 = next(r for r in fgsm_results if r['epsilon'] == 0.1)
-print(f"    Attack Success Rate: {fgsm_eps01['success_rate']*100:.2f}%")
-print(f"\n  PGD Attack (epsilon=0.1, 10 iterations):")
-pgd_eps01 = next(r for r in pgd_results if r['epsilon'] == 0.1)
-print(f"    Attack Success Rate: {pgd_eps01['success_rate']*100:.2f}%")
-print(f"\n  Membership Inference:")
-print(f"    Attack Accuracy: {membership_results['attack_accuracy']*100:.2f}%")
-print(f"\n  Model Poisoning:")
-print(f"    Accuracy Drop: {poisoning_results['accuracy_drop']*100:.2f}%")
-
-print("\n SAVED FILES:")
-print("  - do_fmbs_data/attack_results.pkl")
-print("  - do_fmbs_attack_results.png")
-
-print("\n NEXT STEP: Phase 4 - Defense Mechanisms")
-print("   (Differential Privacy + Adversarial Training)")
-print("=" * 60)
+if __name__ == "__main__":
+    raise SystemExit(main())
