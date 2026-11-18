@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RUN_DIR = ROOT / "runtime_recording" / "full_pipeline_20260809"
+DEFAULT_RUN_DIR = ROOT / "runtime_recording" / "final_scientific_replay_20260907"
 PHASE_SPECS = [
     {
         "phase": 1,
@@ -40,7 +40,6 @@ PHASE_SPECS = [
         "script": "phase2_federated_learning.py",
         "arguments": [
             "--rounds", "12", "--local-epochs", "2", "--batch-size", "64",
-            "--max-pairs", "640", "--test-pairs", "100",
         ],
         "scope": "Five-client federated baseline with the presentation configuration",
     },
@@ -48,8 +47,9 @@ PHASE_SPECS = [
         "phase": 3,
         "script": "phase3_adversarial_attacks.py",
         "arguments": [
-            "--epsilon", "0.10", "--membership-threshold", "0.70",
-            "--poison-rate", "0.10", "--poison-epochs", "3",
+            "--epsilons", "0.01,0.05,0.10,0.20,0.30",
+            "--pgd-iterations", "10", "--poison-rate", "0.10",
+            "--poison-epochs", "3", "--max-test-samples", "0",
         ],
         "scope": "FGSM, PGD, membership inference and label-flipping poisoning",
     },
@@ -57,16 +57,16 @@ PHASE_SPECS = [
         "phase": 4,
         "script": "phase4_defense_mechanisms.py",
         "arguments": [
-            "--epochs", "12", "--max-pairs", "0", "--test-pairs", "0",
-            "--batch-size", "32",
+            "--epochs", "10", "--batch-size", "64",
+            "--noise-stddev", "0.0003", "--adversarial-epsilon", "0.05",
         ],
-        "scope": "Baseline, DP-style, adversarial-training and combined-model comparison",
+        "scope": "Baseline, DP-inspired gradient-noise, adversarial-training and combined-model comparison",
     },
     {
         "phase": 5,
         "script": "phase5_model_validation.py",
-        "arguments": [],
-        "scope": "Robustness, classification and statistical validation",
+        "arguments": ["--bootstrap-repetitions", "2000"],
+        "scope": "Independent classification, calibrated verification, robustness and statistical validation",
     },
     {
         "phase": 6,
@@ -88,6 +88,10 @@ def parse_args() -> argparse.Namespace:
         "--resume", action="store_true",
         help="Skip phases already recorded with exit code zero in the timing JSON.",
     )
+    parser.add_argument(
+        "--rerun-completed", action="store_true",
+        help="With --resume, rerun the selected completed phase(s) and replace only their timing records.",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +103,7 @@ def copy_runtime_sources(run_dir: Path) -> None:
         if len(matches) != 1:
             raise RuntimeError(f"Expected one source matching {name}*.py; found {matches}")
         shutil.copy2(matches[0], run_dir / matches[0].name)
+    shutil.copy2(ROOT / "do_fmbs_core.py", run_dir / "do_fmbs_core.py")
     shutil.copy2(
         ROOT / "scripts" / "constrained_dynamic_model.py",
         run_dir / "scripts" / "constrained_dynamic_model.py",
@@ -159,6 +164,9 @@ def run_phase(run_dir: Path, spec: dict) -> dict:
     environment = os.environ.copy()
     environment["MPLBACKEND"] = "Agg"
     environment["TF_CPP_MIN_LOG_LEVEL"] = "2"
+    environment["TF_NUM_INTRAOP_THREADS"] = "2"
+    environment["TF_NUM_INTEROP_THREADS"] = "2"
+    environment["DO_FMBS_REPLAY_ID"] = run_dir.name
     started_at = datetime.now(ZoneInfo("Africa/Nairobi"))
     start_clock = time.perf_counter()
     print(f"\n[TIMING] Phase {spec['phase']} started at {started_at.isoformat(timespec='seconds')}", flush=True)
@@ -206,6 +214,8 @@ def main() -> None:
     args = parse_args()
     if args.start_phase > args.end_phase:
         raise ValueError("start phase must not exceed end phase")
+    if args.rerun_completed and not args.resume:
+        raise ValueError("--rerun-completed requires --resume to retain existing phase records")
     run_dir = args.run_dir.resolve()
     copy_runtime_sources(run_dir)
     records = existing_records(run_dir) if args.resume else []
@@ -218,7 +228,7 @@ def main() -> None:
         phase = int(spec["phase"])
         if not args.start_phase <= phase <= args.end_phase:
             continue
-        if args.resume and phase in completed:
+        if args.resume and phase in completed and not args.rerun_completed:
             print(f"[TIMING] Phase {phase} already completed; skipping under --resume", flush=True)
             continue
         record = run_phase(run_dir, spec)

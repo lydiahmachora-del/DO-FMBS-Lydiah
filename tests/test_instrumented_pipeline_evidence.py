@@ -119,21 +119,21 @@ class InstrumentedPipelineUnitTests(unittest.TestCase):
             by_phase[2]["arguments"],
             [
                 "--rounds", "12", "--local-epochs", "2", "--batch-size", "64",
-                "--max-pairs", "640", "--test-pairs", "100",
             ],
         )
         self.assertEqual(
             by_phase[3]["arguments"],
             [
-                "--epsilon", "0.10", "--membership-threshold", "0.70",
-                "--poison-rate", "0.10", "--poison-epochs", "3",
+                "--epsilons", "0.01,0.05,0.10,0.20,0.30",
+                "--pgd-iterations", "10", "--poison-rate", "0.10",
+                "--poison-epochs", "3", "--max-test-samples", "0",
             ],
         )
         self.assertEqual(
             by_phase[4]["arguments"],
             [
-                "--epochs", "12", "--max-pairs", "0", "--test-pairs", "0",
-                "--batch-size", "32",
+                "--epochs", "10", "--batch-size", "64",
+                "--noise-stddev", "0.0003", "--adversarial-epsilon", "0.05",
             ],
         )
 
