@@ -80,7 +80,7 @@ Start the manifest-backed dashboard with:
 streamlit run app.py
 ```
 
-The dashboard separates data provenance, federated training, classification, claimed-identity verification, face-only adversarial results, defenses, dynamic optimization and artifact traceability.
+The dashboard now provides an Overview plus a sidebar for Phases 1–6 and Evidence & Provenance. Each phase explains its purpose, prerequisites, inputs and outputs, shows the recorded configuration and results, and runs in order with streamed console output. A new simulation writes into its own replay folder; after Phase 6 the dashboard runs the independent audit and builds that replay's manifest. The existing accepted manifest remains available as read-only evidence while a new replay is in progress.
 
 ## Chapter Four
 

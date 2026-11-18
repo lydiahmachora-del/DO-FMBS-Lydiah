@@ -261,6 +261,43 @@ def build_report(manifest: dict, output: Path) -> Report:
         ["Face/fingerprint loss weights", f"{p['loss_weights']['face']}/{p['loss_weights']['fingerprint']}"],
         ["Partition", fed["federated_partition"]],
     ], "do_fmbs_data/phase2_metrics.json")
+    partition_path = find_artifact(manifest, "client_partition.json")
+    partition = json.loads(partition_path.read_text(encoding="utf-8"))
+    face_total = sum(int(client["face_samples"]) for client in partition["clients"])
+    fingerprint_total = sum(int(client["fingerprint_samples"]) for client in partition["clients"])
+    last_round = len(fed["history"]["round"])
+    face_loss_value = float(fed["history"]["face_loss"][-1])
+    fingerprint_loss_value = float(fed["history"]["fingerprint_loss"][-1])
+    combined_loss_value = float(fed["history"]["total_loss"][-1])
+    mechanism_rows = [
+        ["Face loss", f"L_face = -(1/B) sum_i log(p_face[i, y_i]); lambda_face = 0.5. Round {last_round} weighted local loss = {face_loss_value:.6f}.",
+         "Mean face cross-entropy; the coefficient sets its share of the joint objective."],
+        ["Fingerprint loss", f"L_fingerprint = -(1/B) sum_i log(p_fingerprint[i, y_i]); lambda_fingerprint = 0.5. Round {last_round} weighted local loss = {fingerprint_loss_value:.6f}.",
+         "Mean fingerprint cross-entropy; the coefficient sets its share of the joint objective."],
+        ["Combined loss", f"L_DO-FMBS = 0.5 L_face + 0.5 L_fingerprint. Round {last_round} logged total loss = {combined_loss_value:.6f}.",
+         "The two modality losses contribute equally during local optimization."],
+    ]
+    for client in partition["clients"]:
+        client_id = int(client["client_id"])
+        face_count = int(client["face_samples"])
+        fingerprint_count = int(client["fingerprint_samples"])
+        weight = 0.5 * face_count / face_total + 0.5 * fingerprint_count / fingerprint_total
+        mechanism_rows.append([
+            f"Client {client_id}",
+            f"alpha_{client_id} = 0.5({face_count}/{face_total}) + 0.5({fingerprint_count}/{fingerprint_total}) = {weight:.6f}. Counts: {face_count} face, {fingerprint_count} fingerprint.",
+            f"FedAvg parameter contribution = {pct(weight)} of the global update."])
+    report.page_break()
+    report.table("DO-FMBS Loss Computation and Client Aggregation Parameters",
+                 ["Component", "Equation and replay values", "Purpose"],
+                 mechanism_rows, "do_fmbs_data/phase2_metrics.json; do_fmbs_data/client_partition.json")
+    report.paragraph(
+        "Here B=64 is the local mini-batch size and p_modality[i, y_i] is the probability assigned to the "
+        "true identity for example i. "
+        f"The round {last_round} losses are recorded weighted averages of each client's final local-epoch "
+        "losses; they illustrate the changing loss values and are not fixed model parameters. Client weights "
+        "are calculated from the persisted partition counts and sum to 1.000000. The modality counts refer "
+        "to separate identity populations; they do not indicate paired people."
+    )
     report.paragraph(
         f"The federated baseline reached face classification accuracy {pct(fed['face_classification']['accuracy'])} "
         f"and fingerprint classification accuracy {pct(fed['fingerprint_classification']['accuracy'])} on "

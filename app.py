@@ -1,8 +1,13 @@
-"""Streamlit evidence dashboard for the synchronized DO-FMBS replay."""
+"""DO-FMBS phase-by-phase simulation workspace and evidence dashboard."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -10,236 +15,544 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "do_fmbs_data" / "final_evidence_manifest.json"
+RUNNER = ROOT / "scripts" / "run_isolated_instrumented_pipeline.py"
+AUDITOR = ROOT / "scripts" / "verify_replay_evidence.py"
+MANIFEST_BUILDER = ROOT / "scripts" / "build_final_evidence_manifest.py"
+RUN_ROOT = ROOT / "runtime_recording"
 
-st.set_page_config(page_title="DO-FMBS Scientific Evidence", page_icon="🔐", layout="wide")
+PHASES = [
+    {
+        "number": 1, "name": "Data preparation", "page": "Phase 1 · Data",
+        "purpose": "Prepare the face and fingerprint datasets, fit preprocessing on training data, and verify the synthetic fingerprint identities before training.",
+        "inputs": "LFW face images and seeded fingerprint identity templates.",
+        "outputs": "Train/calibration/test partitions, train-only scalers, client partitions, and the fingerprint quality gate.",
+        "prerequisite": "None — first phase in a new replay.",
+    },
+    {
+        "number": 2, "name": "Federated learning", "page": "Phase 2 · Federated",
+        "purpose": "Train the independent face and fingerprint identity heads across five class-exclusive non-IID clients and aggregate the local model parameters.",
+        "inputs": "Phase 1 partitions, scalers, and exact persisted client files.",
+        "outputs": "Federated baseline model, round history, modality losses, and convergence evidence.",
+        "prerequisite": "Phase 1 completed successfully.",
+    },
+    {
+        "number": 3, "name": "Attack simulation", "page": "Phase 3 · Attacks",
+        "purpose": "Measure face-branch FGSM/PGD evasion, confidence-based membership inference, and the controlled label-flipping scenario.",
+        "inputs": "Phase 2 baseline and the persisted training/test partitions.",
+        "outputs": "Attack settings, denominators, success rates, and attack plots.",
+        "prerequisite": "Phase 2 completed successfully.",
+    },
+    {
+        "number": 4, "name": "Defense mechanisms", "page": "Phase 4 · Defenses",
+        "purpose": "Compare the baseline, DP-inspired gradient noise, adversarial training, and the combined two-modality objective.",
+        "inputs": "Phase 2 baseline and Phase 3 attack configuration.",
+        "outputs": "Per-modality defense metrics, combined losses, and fingerprint-gradient checks.",
+        "prerequisite": "Phase 3 completed successfully.",
+    },
+    {
+        "number": 5, "name": "Model validation", "page": "Phase 5 · Validation",
+        "purpose": "Evaluate classification and claimed-identity verification separately for each modality, then report uncertainty and paired comparisons.",
+        "inputs": "Phase 2 baseline, Phase 4 final model, and the untouched calibration/test partitions.",
+        "outputs": "Classification reports, frozen verification thresholds, FAR/FRR, confidence intervals, ROC curves, and robustness evidence.",
+        "prerequisite": "Phase 4 completed successfully.",
+    },
+    {
+        "number": 6, "name": "Dynamic optimization", "page": "Phase 6 · Optimization",
+        "purpose": "Fit the declared constrained simulation model, check its diagnostics, and calculate the round-specific control schedule.",
+        "inputs": "Completed phase evidence and the declared seeded factorial simulation.",
+        "outputs": "Coefficients, constraints, diagnostics, sensitivity analysis, and the optimization schedule.",
+        "prerequisite": "Phase 5 completed successfully.",
+    },
+]
+PAGE_OPTIONS = ["Overview", *[phase["page"] for phase in PHASES], "Evidence & provenance"]
+
+st.set_page_config(page_title="DO-FMBS | Simulation workspace", page_icon="🧬", layout="wide")
+st.markdown("""
+<style>
+    :root { --navy:#10283f; --blue:#1e4b70; --teal:#087f8c; --ink:#172b3a; --muted:#667887; }
+    .block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1500px; }
+    [data-testid="stSidebar"] { background: linear-gradient(180deg,#10283f 0%,#173c59 100%); }
+    [data-testid="stSidebar"] * { color:#eef5f7; }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label { color:#edf5f7; }
+    .hero { padding:1.5rem 1.8rem; border-radius:16px; color:white; background:linear-gradient(115deg,#10283f,#1e5873); margin-bottom:1rem; }
+    .hero h1 { color:white; margin:0 0 .35rem 0; font-size:2rem; }
+    .hero p { color:#d5e5ec; margin:0; }
+    .eyebrow { color:#82d2d0; text-transform:uppercase; letter-spacing:.12em; font-size:.74rem; font-weight:700; }
+    .phase-card { background:#f5f8fa; border:1px solid #e1e8ed; border-radius:12px; padding:1rem 1.1rem; min-height:132px; }
+    .phase-card h4 { color:#173c59; margin:.15rem 0 .45rem 0; }
+    .phase-card p { color:#526574; font-size:.9rem; margin:0; }
+    .small-muted { color:#667887; font-size:.86rem; }
+    div[data-testid="stMetric"] { background:#f7fafb; border:1px solid #e5ecef; padding:.7rem .85rem; border-radius:10px; }
+    .stButton > button[kind="primary"] { background:#087f8c; border-color:#087f8c; }
+</style>
+""", unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner=False)
-def load_manifest(path: str, modified_ns: int) -> dict:
+def read_json(path_string: str, modified_ns: int) -> dict:
     del modified_ns
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return json.loads(Path(path_string).read_text(encoding="utf-8"))
+
+
+def load_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return read_json(str(path), path.stat().st_mtime_ns)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def percent(value: object, digits: int = 2) -> str:
     return f"{100.0 * float(value):.{digits}f}%"
 
 
-def source_caption(path: str, stage: str) -> None:
-    st.caption(f"Source artifact: `{path}` · Experimental stage: {stage}")
+def selected_run_dir() -> Path | None:
+    raw = st.session_state.get("active_run_dir")
+    if not raw:
+        return None
+    candidate = Path(raw).resolve()
+    try:
+        candidate.relative_to(RUN_ROOT.resolve())
+    except ValueError:
+        st.session_state.pop("active_run_dir", None)
+        return None
+    return candidate
 
 
-def classification_panel(title: str, values: dict, source: str) -> None:
-    st.subheader(title)
-    columns = st.columns(5)
-    columns[0].metric("Accuracy", percent(values["accuracy"]))
-    columns[1].metric("Macro precision", percent(values["macro_precision"]))
-    columns[2].metric("Macro recall", percent(values["macro_recall"]))
-    columns[3].metric("Macro F1", percent(values["macro_f1"]))
-    columns[4].metric("Weighted F1", percent(values["weighted_f1"]))
-    low, high = values["accuracy_wilson_95"]
-    st.write(
-        f"Correct decisions: **{values['correct']}/{values['samples']}**. "
-        f"Accuracy 95% Wilson CI: **[{percent(low)}, {percent(high)}]**."
-    )
-    source_caption(source, "Phase 5 final classification test")
+def current_manifest() -> tuple[dict | None, Path | None]:
+    run_dir = selected_run_dir()
+    if run_dir is not None:
+        candidate = run_dir / "do_fmbs_data" / "final_evidence_manifest.json"
+        payload = load_json(candidate)
+        if payload and payload.get("status") == "AUTHORITATIVE-SYNCHRONIZED-REPLAY-COMPLETE":
+            return payload, candidate
+        return None, None
+    payload = load_json(MANIFEST_PATH)
+    if payload and payload.get("status") == "AUTHORITATIVE-SYNCHRONIZED-REPLAY-COMPLETE":
+        return payload, MANIFEST_PATH
+    return None, None
 
 
-def verification_panel(title: str, values: dict, source: str) -> None:
-    final = values["final_test"]
-    st.subheader(title)
-    columns = st.columns(5)
-    columns[0].metric("FAR", percent(final["FAR"], 3))
-    columns[1].metric("FRR", percent(final["FRR"], 3))
-    columns[2].metric("TAR / GAR", percent(final["TAR"], 3))
-    columns[3].metric("ROC AUC", f"{float(final['ROC_AUC']):.4f}")
-    columns[4].metric("EER", percent(final["EER"], 3))
-    st.write(
-        f"FAR = **{final['impostor_accepts']}/{final['impostor_attempts']}**; "
-        f"FRR = **{final['genuine_rejects']}/{final['genuine_attempts']}**; "
-        f"frozen threshold = **{float(final['threshold']):.6f}**."
-    )
-    st.write(
-        f"FAR 95% Wilson CI: [{percent(final['FAR_wilson_95'][0], 3)}, "
-        f"{percent(final['FAR_wilson_95'][1], 3)}]; "
-        f"FRR 95% Wilson CI: [{percent(final['FRR_wilson_95'][0], 3)}, "
-        f"{percent(final['FRR_wilson_95'][1], 3)}]."
-    )
-    st.caption(values["threshold_rule"] + ". " + values["accept_rule"] + ".")
-    source_caption(source, "Phase 5 calibration and independent final verification test")
+def registry_for(run_dir: Path | None, manifest: dict | None) -> tuple[list[dict], str | None]:
+    if run_dir is not None:
+        path = run_dir / "phase_runtime_registry.json"
+        payload = load_json(path)
+        return (payload or {}).get("records", []), str(path) if path.exists() else None
+    if manifest:
+        return manifest.get("runtime", {}).get("records", []), None
+    return [], None
 
 
-def artifact_path(manifest: dict, suffix: str) -> Path | None:
+def completed_phases(records: list[dict]) -> set[int]:
+    return {
+        int(row["phase"])
+        for row in records
+        if int(row.get("exit_code", 1)) == 0
+        and row.get("status") == "EXECUTION-COMPLETED"
+    }
+
+
+def artifact_path(manifest: dict | None, suffix: str) -> Path | None:
+    if not manifest:
+        return None
     for item in manifest.get("artifacts", []):
-        if item["path"].endswith(suffix):
-            return ROOT / item["path"]
+        if item.get("path", "").endswith(suffix):
+            path = ROOT / item["path"]
+            return path if path.exists() else None
     return None
 
 
-st.title("DO-FMBS Scientific Evidence Dashboard")
-st.write("Dynamic Optimization Federated Multimodal Biometric System — synchronized experimental evidence")
+def phase_artifact_path(run_dir: Path | None, manifest: dict | None, phase: int, suffix: str) -> Path | None:
+    if manifest:
+        return artifact_path(manifest, suffix)
+    if run_dir:
+        path = run_dir / "do_fmbs_data" / suffix
+        return path if path.exists() else None
+    return None
 
-if not MANIFEST_PATH.exists():
-    st.error("No authoritative replay manifest is available. Run the full Phase 1–6 replay and manifest builder first.")
-    st.code(
-        ".\\venv\\Scripts\\python.exe scripts\\run_isolated_instrumented_pipeline.py\n"
-        ".\\venv\\Scripts\\python.exe scripts\\build_final_evidence_manifest.py",
-        language="powershell",
-    )
-    st.stop()
 
-manifest = load_manifest(str(MANIFEST_PATH), MANIFEST_PATH.stat().st_mtime_ns)
-st.success(f"{manifest['status']} · replay `{manifest['replay_id']}`")
-st.caption(
-    f"Manifest: `{MANIFEST_PATH.relative_to(ROOT)}` · Git commit: `{manifest['git']['commit']}` · "
-    f"Working tree dirty when recorded: {manifest['git']['working_tree_dirty_at_manifest_creation']}"
-)
+def run_streamed(command: list[str], title: str) -> bool:
+    output = st.empty()
+    lines: list[str] = []
+    status = st.status(title, expanded=True)
+    environment = os.environ.copy()
+    environment["PYTHONUNBUFFERED"] = "1"
+    environment["MPLBACKEND"] = "Agg"
+    try:
+        process = subprocess.Popen(
+            command, cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.append(line.rstrip())
+            output.code("\n".join(lines[-45:]), language="text")
+        return_code = process.wait()
+    except OSError as error:
+        status.update(label=f"Could not start: {title}", state="error")
+        st.error(str(error))
+        return False
+    if return_code == 0:
+        status.update(label=f"Completed: {title}", state="complete", expanded=False)
+        return True
+    status.update(label=f"Failed: {title} (exit {return_code})", state="error", expanded=True)
+    return False
 
-tabs = st.tabs([
-    "Study & data", "Federated learning", "Classification", "Verification",
-    "Adversarial robustness", "Privacy & defenses", "Dynamic optimization", "Traceability",
-])
 
-with tabs[0]:
-    st.header("Study scope and dataset evidence")
-    st.info(manifest["methodological_scope"]["identity_spaces"])
-    dataset_rows = []
-    for modality in ("face", "fingerprint"):
-        row = manifest["dataset_statistics"][modality]
-        dataset_rows.append({
-            "Modality": modality.title(), "Source": row["source"], "Identities": row["identities"],
-            "Total": row["total"], "Training": row["train"], "Calibration": row["calibration"],
-            "Final test": row["test"], "Scaler fit": row["scaler_fit"],
-        })
-    st.dataframe(pd.DataFrame(dataset_rows), use_container_width=True, hide_index=True)
-    quality = manifest["dataset_statistics"]["fingerprint"]["quality_gate"]
-    st.subheader("Fingerprint identity-separability gate")
-    columns = st.columns(4)
-    columns[0].metric("Same-identity mean", f"{quality['same_identity_similarity_mean']:.3f}")
-    columns[1].metric("Different-identity mean", f"{quality['different_identity_similarity_mean']:.3f}")
-    columns[2].metric("Inter/intra ratio", f"{quality['inter_to_intra_distance_ratio']:.2f}")
-    columns[3].metric("Nearest-neighbour identity", percent(quality["nearest_neighbour_identity_accuracy"]))
-    st.write(f"Gate decision: **{'PASS' if quality['passed'] else 'FAIL'}**")
-    source_caption("do_fmbs_data/fingerprint_quality_diagnostics.json (inside authoritative replay)", "Phase 1 pre-training gate")
-    for suffix in ("fingerprint_same_identity_grid.png", "fingerprint_similarity_distributions.png"):
-        image = artifact_path(manifest, suffix)
-        if image and image.exists():
-            st.image(str(image), use_container_width=True)
+def start_new_replay() -> Path:
+    stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
+    run_dir = RUN_ROOT / f"interactive_replay_{stamp}"
+    suffix = 1
+    while run_dir.exists():
+        run_dir = RUN_ROOT / f"interactive_replay_{stamp}_{suffix}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+    st.session_state["active_run_dir"] = str(run_dir)
+    st.session_state["selected_page"] = PHASES[0]["page"]
+    return run_dir
 
-with tabs[1]:
-    st.header("Federated learning")
-    fed = manifest["federated_learning"]
-    parameters = fed["training_parameters"]
-    st.write(fed["architecture_scope"] + ".")
-    st.write(f"Partition: {fed['federated_partition']}.")
-    columns = st.columns(4)
-    columns[0].metric("Clients", str(fed["clients"]))
-    columns[1].metric("Rounds", str(parameters["rounds"]))
-    columns[2].metric("Local epochs", str(parameters["local_epochs"]))
-    columns[3].metric("Batch size", str(parameters["batch_size"]))
-    st.dataframe(pd.DataFrame([
-        {"Modality": "Face", **fed["face_classification"]},
-        {"Modality": "Fingerprint", **fed["fingerprint_classification"]},
-    ]), use_container_width=True, hide_index=True)
-    source_caption("do_fmbs_data/phase2_metrics.json (inside authoritative replay)", "Phase 2 federated baseline")
-    image = artifact_path(manifest, "federated_training_convergence.png")
-    if image and image.exists():
-        st.image(str(image), use_container_width=True)
 
-with tabs[2]:
-    st.header("Final independent classification")
-    metrics = manifest["final_metrics"]
-    classification_panel("Face Classification", metrics["face_classification"], "face_classification_report.json")
-    classification_panel("Fingerprint Classification", metrics["fingerprint_classification"], "fingerprint_classification_report.json")
-    cols = st.columns(2)
-    for column, suffix, caption in zip(cols, ("face_confusion_matrix.png", "fingerprint_confusion_matrix.png"),
-                                        ("Face confusion matrix", "Fingerprint confusion matrix")):
-        image = artifact_path(manifest, suffix)
-        if image and image.exists():
-            column.image(str(image), caption=caption, use_container_width=True)
-
-with tabs[3]:
-    st.header("Claimed-identity verification")
-    verification_panel("Face Verification", manifest["final_metrics"]["face_verification"], "face_verification_report.json")
-    verification_panel("Fingerprint Verification", manifest["final_metrics"]["fingerprint_verification"], "fingerprint_verification_report.json")
-    for modality in ("face", "fingerprint"):
-        st.subheader(f"{modality.title()} verification figures")
-        cols = st.columns(3)
-        for column, suffix in zip(cols, (
-            f"{modality}_genuine_impostor_distribution.png", f"{modality}_verification_roc.png",
-            f"{modality}_far_frr_threshold.png",
-        )):
-            image = artifact_path(manifest, suffix)
-            if image and image.exists():
-                column.image(str(image), use_container_width=True)
-
-with tabs[4]:
-    st.header("Adversarial Robustness")
-    st.warning(manifest["methodological_scope"]["adversarial"])
-    phase3 = manifest["attacks"]
-    st.subheader("FGSM and PGD attack simulation")
-    st.dataframe(pd.DataFrame(phase3["evasion"]), use_container_width=True, hide_index=True)
-    st.subheader("Final-model face FGSM robustness")
-    robust = manifest["final_metrics"]["robustness"]
-    rows = []
-    for model_name in ("baseline", "do_fmbs"):
-        rows.extend({"model": model_name, **row} for row in robust[model_name])
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    source_caption("phase3_attack_results.json and face_robustness_report.json", "Phases 3 and 5; face branch only")
-    image = artifact_path(manifest, "face_robustness_validation.png")
-    if image and image.exists():
-        st.image(str(image), use_container_width=True)
-
-with tabs[5]:
-    st.header("Privacy / Defense Results")
-    defense = manifest["defenses"]
-    st.warning(defense["privacy_terminology"])
-    rows = []
-    for model_name, values in defense["comparison"].items():
-        rows.append({
-            "Model": model_name, "Face accuracy": values["face_classification"]["accuracy"],
-            "Fingerprint accuracy": values["fingerprint_classification"]["accuracy"],
-            "Face FGSM ASR": values["face_fgsm"]["attack_success_rate"],
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.subheader("Membership inference")
-    st.json(manifest["attacks"]["membership_inference"], expanded=False)
-    st.subheader("Label-flipping poisoning")
-    st.json(manifest["attacks"]["label_flipping_poisoning"], expanded=False)
-    source_caption("phase4_defense_results.json", "Phase 4 defense comparison")
-    image = artifact_path(manifest, "defense_comparison.png")
-    if image and image.exists():
-        st.image(str(image), use_container_width=True)
-
-with tabs[6]:
-    st.header("Dynamic Optimization")
-    fit = manifest["dynamic_optimization"]["model_fit"]
-    st.info(fit["scope_statement"])
-    columns = st.columns(4)
-    columns[0].metric("Observations", str(fit["observations"]))
-    columns[1].metric("R²", f"{fit['r_squared']:.4f}")
-    columns[2].metric("Adjusted R²", f"{fit['adjusted_r_squared']:.4f}")
-    columns[3].metric("RMSE", f"{fit['rmse']:.4f}")
-    st.subheader("Constrained coefficients")
-    coefficient_rows = [
-        {"Parameter": name, "Estimate": estimate, "95% CI low": low, "95% CI high": high}
-        for name, estimate, low, high in zip(fit["names"], fit["coefficients"], fit["ci_low"], fit["ci_high"])
+def execute_phase(phase_number: int, run_dir: Path) -> bool:
+    command = [
+        sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
+        "--start-phase", str(phase_number), "--end-phase", str(phase_number), "--resume",
     ]
-    st.dataframe(pd.DataFrame(coefficient_rows), use_container_width=True, hide_index=True)
-    st.write(f"Constraints satisfied: **{fit['constraints_satisfied']}**. Optimization success: **{fit['optimization_success']}**.")
-    source_caption(manifest["dynamic_optimization"]["artifact_directory"] + "/model_fit.json", "Phase 6 controlled simulation")
+    if not run_streamed(command, f"Phase {phase_number}: {PHASES[phase_number - 1]['name']}"):
+        return False
+    if phase_number != 6:
+        st.session_state["selected_page"] = PHASES[phase_number]["page"]
+        st.rerun()
+        return True
 
-with tabs[7]:
-    st.header("Scientific traceability")
-    st.write(f"Authoritative replay root: `{manifest['authoritative_replay_root']}`")
-    st.write(f"Recorded Phase 1–6 runtime: **{manifest['runtime']['total_seconds']:.2f} seconds**")
-    runtime_rows = [{key: row.get(key) for key in ("phase", "script", "command", "elapsed_seconds", "exit_code", "status")}
+    return finalize_replay(run_dir)
+
+
+def finalize_replay(run_dir: Path) -> bool:
+    if not run_streamed(
+        [sys.executable, "-u", str(AUDITOR), "--run-dir", str(run_dir)],
+        "Independent replay audit",
+    ):
+        return False
+    manifest_path = run_dir / "do_fmbs_data" / "final_evidence_manifest.json"
+    if not run_streamed(
+        [sys.executable, "-u", str(MANIFEST_BUILDER), "--run-dir", str(run_dir), "--publish-path", str(manifest_path)],
+        "Build synchronized evidence manifest",
+    ):
+        return False
+    st.success("All six phases completed. Independent audit passed and the replay manifest is ready.")
+    st.rerun()
+    return True
+
+
+def metric_card_row(items: list[tuple[str, str]]) -> None:
+    columns = st.columns(len(items))
+    for column, (label, value) in zip(columns, items):
+        column.metric(label, value)
+
+
+def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path | None) -> None:
+    if not manifest:
+        if run_dir:
+            st.info("This replay is still in progress. Phase results appear here after this phase finishes.")
+        else:
+            st.info("The accepted replay manifest is not available. Start a new replay to generate phase evidence.")
+        return
+
+    if phase_number == 1:
+        st.subheader("Dataset and preparation evidence")
+        stats = manifest["dataset_statistics"]
+        rows = []
+        for modality in ("face", "fingerprint"):
+            value = stats[modality]
+            rows.append({"Modality": modality.title(), "Source": value["source"], "Identities": value["identities"],
+                         "Total": value["total"], "Train": value["train"], "Calibration": value["calibration"],
+                         "Final test": value["test"], "Scaler": value["scaler_fit"]})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        quality = stats["fingerprint"]["quality_gate"]
+        st.markdown("#### Fingerprint identity quality gate")
+        metric_card_row([
+            ("Same identity mean", f"{quality['same_identity_similarity_mean']:.3f}"),
+            ("Different identity mean", f"{quality['different_identity_similarity_mean']:.3f}"),
+            ("Inter/intra distance ratio", f"{quality['inter_to_intra_distance_ratio']:.2f}"),
+            ("Nearest-neighbour accuracy", percent(quality["nearest_neighbour_identity_accuracy"])),
+            ("Gate", "PASS" if quality["passed"] else "FAIL"),
+        ])
+        cols = st.columns(2)
+        for col, suffix, title in zip(cols, ("fingerprint_same_identity_grid.png", "fingerprint_similarity_distributions.png"),
+                                      ("Persistent synthetic identity examples", "Fingerprint separability check")):
+            image = artifact_path(manifest, suffix)
+            if image:
+                col.image(str(image), caption=title, use_container_width=True)
+
+    elif phase_number == 2:
+        fed = manifest["federated_learning"]
+        params = fed["training_parameters"]
+        st.subheader("Federated configuration")
+        metric_card_row([("Clients", str(fed["clients"])), ("Rounds", str(params["rounds"])),
+                         ("Local epochs", str(params["local_epochs"])), ("Batch size", str(params["batch_size"])),
+                         ("Learning rate", str(params["learning_rate"]))])
+        st.caption(fed["federated_partition"] + ". Labels remain independent across the two modalities.")
+        rows = []
+        for modality, result in (("Face", fed["face_classification"]), ("Fingerprint", fed["fingerprint_classification"])):
+            rows.append({"Modality": modality, "Samples": result["samples"], "Classes": result["classes"],
+                         "Accuracy": percent(result["accuracy"]), "Test cross-entropy": f"{result['loss']:.4f}"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        history = fed.get("history", {})
+        if history:
+            frame = pd.DataFrame({"Round": history["round"], "Face accuracy": history["face_accuracy"],
+                                  "Fingerprint accuracy": history["fingerprint_accuracy"],
+                                  "Face loss": history["face_loss"], "Fingerprint loss": history["fingerprint_loss"]})
+            st.line_chart(frame.set_index("Round"), height=300)
+        image = artifact_path(manifest, "federated_client_distribution.png")
+        if image:
+            st.image(str(image), caption="Class-exclusive non-IID client allocation", use_container_width=True)
+
+    elif phase_number == 3:
+        attacks = manifest["attacks"]
+        st.warning("FGSM/PGD evasion measurements apply to the face branch only.")
+        st.subheader("Evasion experiments")
+        st.dataframe(pd.DataFrame(attacks.get("evasion", [])), use_container_width=True, hide_index=True)
+        left, right = st.columns(2)
+        left.markdown("#### Membership inference")
+        left.json(attacks.get("membership_inference", {}), expanded=False)
+        right.markdown("#### Label-flipping poisoning")
+        right.json(attacks.get("label_flipping_poisoning", {}), expanded=False)
+        image = artifact_path(manifest, "face_adversarial_attacks.png")
+        if image:
+            st.image(str(image), caption="Face-branch adversarial evaluation", use_container_width=True)
+
+    elif phase_number == 4:
+        defense = manifest["defenses"]
+        st.info("Combined objective: 0.5 × face loss + 0.5 × fingerprint loss. Gaussian gradient noise is DP-inspired; no formal privacy budget is claimed.")
+        rows = []
+        for name, value in defense["comparison"].items():
+            rows.append({"Configuration": name.replace("_", " ").title(),
+                         "Face accuracy": percent(value["face_classification"]["accuracy"]),
+                         "Fingerprint accuracy": percent(value["fingerprint_classification"]["accuracy"]),
+                         "Face FGSM ASR": percent(value["face_fgsm"]["attack_success_rate"])})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("The replay records nonzero fingerprint-head gradients during combined-loss training.")
+        image = artifact_path(manifest, "defense_comparison.png")
+        if image:
+            st.image(str(image), caption="Modality-specific defense comparison", use_container_width=True)
+
+    elif phase_number == 5:
+        metrics = manifest["final_metrics"]
+        st.subheader("Classification")
+        rows = []
+        for modality in ("face", "fingerprint"):
+            result = metrics[f"{modality}_classification"]
+            rows.append({"Modality": modality.title(), "Correct": f"{result['correct']}/{result['samples']}",
+                         "Accuracy": percent(result["accuracy"]), "Macro F1": percent(result["macro_f1"]),
+                         "Weighted F1": percent(result["weighted_f1"])})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.subheader("Claimed-identity verification")
+        rows = []
+        for modality in ("face", "fingerprint"):
+            result = metrics[f"{modality}_verification"]["final_test"]
+            rows.append({"Modality": modality.title(), "FAR": percent(result["FAR"], 3),
+                         "FRR": percent(result["FRR"], 3), "TAR": percent(result["TAR"], 3),
+                         "AUC": f"{result['ROC_AUC']:.4f}", "EER": percent(result["EER"], 3),
+                         "Threshold": f"{result['threshold']:.6f}"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Each threshold was selected on calibration data and frozen before the final test. Classification accuracy is a separate task from FAR/FRR.")
+        cols = st.columns(2)
+        for col, suffix, title in zip(cols, ("face_confusion_matrix.png", "fingerprint_confusion_matrix.png"),
+                                      ("Face confusion matrix", "Fingerprint confusion matrix")):
+            image = artifact_path(manifest, suffix)
+            if image:
+                col.image(str(image), caption=title, use_container_width=True)
+
+    elif phase_number == 6:
+        fit = manifest["dynamic_optimization"]["model_fit"]
+        st.info(fit["scope_statement"])
+        metric_card_row([("Observations", str(fit["observations"])), ("R²", f"{fit['r_squared']:.4f}"),
+                         ("Adjusted R²", f"{fit['adjusted_r_squared']:.4f}"),
+                         ("Cross-validated R²", f"{fit['cross_validation_r2_mean']:.4f}"),
+                         ("RMSE", f"{fit['rmse']:.4f}")])
+        rows = [{"Coefficient": name, "Estimate": estimate, "95% CI": f"[{low:.4f}, {high:.4f}]"}
+                for name, estimate, low, high in zip(fit["names"], fit["coefficients"], fit["ci_low"], fit["ci_high"])]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        schedule = phase_artifact_path(run_dir, manifest, 6, "dynamic_optimization_schedule.csv")
+        if schedule:
+            frame = pd.read_csv(schedule)
+            if "round" in frame:
+                st.line_chart(frame.set_index("round"), height=300)
+        st.caption(f"Coefficient constraints satisfied: {fit['constraints_satisfied']}. Optimization success: {fit['optimization_success']}.")
+
+
+def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | None) -> None:
+    st.markdown('<div class="hero"><div class="eyebrow">Research simulation workspace</div><h1>DO-FMBS</h1><p>Six phases, traceable inputs, visible execution, and evidence from one replay.</p></div>', unsafe_allow_html=True)
+    done = completed_phases(records)
+    if manifest:
+        state_text = "Completed replay"
+        replay_id = manifest["replay_id"]
+        runtime = manifest.get("runtime", {}).get("total_seconds", 0.0)
+    elif run_dir:
+        state_text = "Replay in progress"
+        replay_id = run_dir.name
+        runtime = sum(float(row.get("elapsed_seconds", 0)) for row in records)
+    else:
+        state_text = "Ready to begin"
+        replay_id = "No active replay"
+        runtime = 0.0
+    metric_card_row([("Replay status", state_text), ("Replay ID", replay_id),
+                     ("Phase progress", f"{len(done)}/6"), ("Recorded runtime", f"{runtime:.1f} sec")])
+    st.progress(len(done) / 6, text=f"Simulation pipeline: {len(done)} of 6 phases complete")
+    st.markdown("### Phase workflow")
+    for offset in range(0, 6, 3):
+        cols = st.columns(3)
+        for col, phase in zip(cols, PHASES[offset:offset + 3]):
+            number = phase["number"]
+            status_text = "Complete" if number in done else ("Ready" if number == (len(done) + 1) else "Waiting")
+            col.markdown(
+                f'<div class="phase-card"><div class="eyebrow">Phase {number} · {status_text}</div>'
+                f'<h4>{phase["name"]}</h4><p>{phase["purpose"]}</p></div>',
+                unsafe_allow_html=True,
+            )
+    st.markdown("### Research guardrails")
+    st.write("Face and fingerprint branches have separate identity spaces. Fingerprints are synthetic and identity-persistent. Evasion results are face-branch only. Gradient noise is DP-inspired and has no formal epsilon/delta guarantee.")
+    if run_dir is None:
+        if st.button("Start a new phase-by-phase simulation", type="primary", use_container_width=True):
+            start_new_replay()
+            st.rerun()
+    elif len(done) == 6 and manifest:
+        st.success("The active replay completed all six phases and passed the independent evidence audit.")
+    elif done:
+        next_phase = min(max(done) + 1, 6)
+        st.info(f"Next phase: {PHASES[next_phase - 1]['name']}. Select it in the sidebar to review its process and run it.")
+    else:
+        st.info("A new replay folder is ready. Select Phase 1 in the sidebar to begin data preparation.")
+
+
+def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
+                      records: list[dict], completed: set[int]) -> None:
+    number = phase["number"]
+    record = next((row for row in records if int(row["phase"]) == number), None)
+    done = number in completed
+    st.markdown(f'<div class="eyebrow">Phase {number} of 6</div>', unsafe_allow_html=True)
+    st.title(phase["name"])
+    st.write(phase["purpose"])
+    columns = st.columns([2, 2, 2, 1.2])
+    columns[0].markdown("**Prerequisite**\n\n" + phase["prerequisite"])
+    columns[1].markdown("**Inputs**\n\n" + phase["inputs"])
+    columns[2].markdown("**Outputs**\n\n" + phase["outputs"])
+    columns[3].metric("Status", "Complete" if done else ("Failed" if record and record.get("exit_code", 0) else "Waiting"))
+
+    run_config = manifest.get("phase_parameters", {}) if manifest else {}
+    config_key = f"phase{number}"
+    configuration = run_config.get(config_key)
+    if configuration:
+        with st.expander("Recorded configuration", expanded=False):
+            st.json(configuration, expanded=False)
+
+    phase_is_next = number == 1 or all(index in completed for index in range(1, number))
+    if run_dir is None:
+        st.warning("To execute phases in order, start a new replay from Overview. The accepted replay shown elsewhere remains available as read-only evidence.")
+    elif phase_is_next:
+        if done:
+            st.success(f"Phase {number} is complete in replay `{run_dir.name}`.")
+            st.caption("This phase is locked for the current replay to preserve downstream consistency. Start another replay to recompute it.")
+        else:
+            st.info("The phase runner will stream its console output here. Each phase writes into this replay's isolated folder.")
+            if st.button(f"Run Phase {number}: {phase['name']}", type="primary"):
+                execute_phase(number, run_dir)
+        if number == 6 and done and not manifest:
+            st.warning("Phase 6 finished, but audit or manifest publication did not. Retry finalization without rerunning model phases.")
+            if st.button("Retry audit and publish evidence", type="primary"):
+                finalize_replay(run_dir)
+    else:
+        waiting_for = next((index for index in range(1, number) if index not in completed), None)
+        st.warning(f"Complete Phase {waiting_for} first. The workflow keeps phase inputs and evidence in sequence.")
+
+    if record:
+        st.caption(f"Last run: {record.get('start_timestamp', 'time unavailable')} · {float(record.get('elapsed_seconds', 0)):.1f} sec · exit {record.get('exit_code')}")
+        log = run_dir / record.get("log_path", f"phase{number}_console.log") if run_dir else None
+        if log and log.exists():
+            with st.expander("Phase console log", expanded=not done):
+                try:
+                    st.code("\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]), language="text")
+                except OSError:
+                    st.caption("Log file could not be read.")
+
+    if done and manifest:
+        st.divider()
+        render_phase_result(number, manifest, run_dir)
+    elif done and run_dir:
+        st.divider()
+        st.subheader("Phase output")
+        output_names = {
+            1: "phase1_metadata.json", 2: "phase2_metrics.json", 3: "phase3_attack_results.json",
+            4: "phase4_defense_results.json", 5: "phase5_validation.json",
+        }
+        if number in output_names:
+            payload = load_json(run_dir / "do_fmbs_data" / output_names[number])
+            if payload:
+                st.json(payload, expanded=False)
+        else:
+            st.info("Phase 6 outputs are saved in the replay's simulation_evidence/constrained_dynamic_model folder.")
+
+
+def render_evidence(manifest: dict | None, records: list[dict], manifest_path: Path | None) -> None:
+    st.title("Evidence & provenance")
+    if not manifest:
+        st.info("A synchronized manifest is published after all six phases and the independent audit complete.")
+        if records:
+            st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        return
+    st.success(f"{manifest['status']} · replay `{manifest['replay_id']}`")
+    st.write(f"Manifest location: `{manifest_path}`")
+    st.write(f"Recorded total phase runtime: **{manifest['runtime']['total_seconds']:.2f} seconds**")
+    st.subheader("Phase execution records")
+    runtime_rows = [{key: row.get(key) for key in ("phase", "script", "scope", "elapsed_seconds", "exit_code", "status")}
                     for row in manifest["runtime"]["records"]]
     st.dataframe(pd.DataFrame(runtime_rows), use_container_width=True, hide_index=True)
-    st.subheader("Hashed authoritative artifacts")
-    st.dataframe(pd.DataFrame(manifest["artifacts"]), use_container_width=True, hide_index=True)
-    st.download_button(
-        "Download final evidence manifest",
-        data=json.dumps(manifest, indent=2),
-        file_name="final_evidence_manifest.json",
-        mime="application/json",
-    )
+    st.subheader("Independent replay audit")
+    st.json(manifest.get("independent_audit", {}), expanded=False)
+    st.subheader("Hashed artifacts")
+    st.dataframe(pd.DataFrame(manifest.get("artifacts", [])), use_container_width=True, hide_index=True)
+    st.download_button("Download evidence manifest", data=json.dumps(manifest, indent=2),
+                       file_name="final_evidence_manifest.json", mime="application/json")
+
+
+manifest, manifest_path = current_manifest()
+run_dir = selected_run_dir()
+records, _registry_path = registry_for(run_dir, manifest)
+done = completed_phases(records)
+
+with st.sidebar:
+    st.markdown("<div style='padding:.5rem 0 1rem'><div style='font-size:1.25rem;font-weight:800'>DO-FMBS</div><div style='font-size:.8rem;color:#c5d9e2'>Simulation & evidence workspace</div></div>", unsafe_allow_html=True)
+    if manifest:
+        st.caption(f"Evidence: {manifest['replay_id']}")
+    elif run_dir:
+        st.caption(f"Active: {run_dir.name}")
+    else:
+        st.caption("No active simulation")
+    st.progress(len(done) / 6, text=f"{len(done)} / 6 phases")
+    for phase in PHASES:
+        number = phase["number"]
+        marker = "✓" if number in done else ("▶" if number == (len(done) + 1) else "·")
+        st.caption(f"{marker}  Phase {number} — {phase['name']}")
+    st.divider()
+    st.radio("Navigate the workflow", PAGE_OPTIONS, key="selected_page", label_visibility="collapsed")
+    st.divider()
+    if run_dir:
+        st.caption("New simulations run in isolated folders; the accepted evidence manifest stays intact until you select a completed replay.")
+        if st.button("Start another replay", use_container_width=True):
+            start_new_replay()
+            st.rerun()
+    elif manifest:
+        if st.button("Start a new simulation", use_container_width=True):
+            start_new_replay()
+            st.rerun()
+    st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:1rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
+
+selected_page = st.session_state.get("selected_page", "Overview")
+if selected_page == "Overview":
+    render_overview(manifest, records, run_dir)
+elif selected_page == "Evidence & provenance":
+    render_evidence(manifest, records, manifest_path)
+else:
+    phase = next(item for item in PHASES if item["page"] == selected_page)
+    render_phase_page(phase, manifest, run_dir, records, done)
