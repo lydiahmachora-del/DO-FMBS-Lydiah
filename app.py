@@ -84,6 +84,16 @@ st.markdown("""
     .small-muted { color:#667887; font-size:.86rem; }
     div[data-testid="stMetric"] { background:#f7fafb; border:1px solid #e5ecef; padding:.7rem .85rem; border-radius:10px; }
     .stButton > button[kind="primary"] { background:#087f8c; border-color:#087f8c; }
+    [data-testid="stSidebar"] [data-testid="stButton"] > button {
+        background:#087f8c !important; color:#ffffff !important;
+        border:1px solid #62c5cb !important; font-weight:700 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
+        background:#066a75 !important; border-color:#8be0df !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] > button:focus-visible {
+        outline:3px solid #f4c95d !important; outline-offset:2px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -267,20 +277,28 @@ def render_federated_history(history: dict, manifest: dict | None, run_dir: Path
         }, index=history["round"])
         chart.index.name = "Federated round"
         st.line_chart(chart, height=280)
-    table = pd.DataFrame({
+    accuracy_table = pd.DataFrame({
         "Federated round": history["round"],
         "Face weighted local accuracy": [percent(value) for value in history["face_accuracy"]],
         "Fingerprint weighted local accuracy": [percent(value) for value in history["fingerprint_accuracy"]],
+    })
+    loss_table = pd.DataFrame({
+        "Federated round": history["round"],
         "Face cross-entropy loss": [f"{value:.4f}" for value in history["face_loss"]],
         "Fingerprint cross-entropy loss": [f"{value:.4f}" for value in history["fingerprint_loss"]],
-        "Combined loss": [f"{value:.4f}" for value in history["total_loss"]],
     })
-    st.subheader("Round values behind the convergence graph")
-    st.dataframe(table, use_container_width=True, hide_index=True)
-    st.caption("Accuracy and loss are alpha-weighted averages of the five clients' final local-epoch metrics for each round. The combined loss uses equal 0.5/0.5 modality weights. These are training-history values, not final test metrics.")
-    st.download_button("Download round values (CSV)", data=table.to_csv(index=False),
-                       file_name="federated_convergence_round_values.csv", mime="text/csv",
-                       key="download_federated_round_values")
+    st.subheader("Values behind the convergence graphs")
+    st.markdown("#### Weighted local accuracy by round")
+    st.dataframe(accuracy_table, use_container_width=True, hide_index=True)
+    st.download_button("Download accuracy values (CSV)", data=accuracy_table.to_csv(index=False),
+                       file_name="federated_convergence_accuracy.csv", mime="text/csv",
+                       key="download_federated_accuracy_values")
+    st.markdown("#### Cross-entropy loss by round")
+    st.dataframe(loss_table, use_container_width=True, hide_index=True)
+    st.download_button("Download loss values (CSV)", data=loss_table.to_csv(index=False),
+                       file_name="federated_convergence_loss.csv", mime="text/csv",
+                       key="download_federated_loss_values")
+    st.caption("For each round and modality, both plotted metrics are alpha-weighted averages of the five clients' final local-epoch metrics. The combined training objective is 0.5 × face loss + 0.5 × fingerprint loss. These are training-history values, not final test metrics.")
 
 
 def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path | None) -> None:
@@ -442,9 +460,8 @@ def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | 
     st.markdown("### Research guardrails")
     st.write("Face and fingerprint branches have separate identity spaces. Fingerprints are synthetic and identity-persistent. Evasion results are face-branch only. Gradient noise is DP-inspired and has no formal epsilon/delta guarantee.")
     if run_dir is None:
-        if st.button("Start a new phase-by-phase simulation", type="primary", use_container_width=True):
-            start_new_replay()
-            st.rerun()
+        st.button("Start a new phase-by-phase simulation", type="primary", use_container_width=True,
+                  on_click=start_new_replay)
     elif len(done) == 6 and manifest:
         st.success("The active replay completed all six phases and passed the independent evidence audit.")
     elif done:
@@ -576,13 +593,9 @@ with st.sidebar:
     st.divider()
     if run_dir:
         st.caption("New simulations run in isolated folders; the accepted evidence manifest stays intact until you select a completed replay.")
-        if st.button("Start another replay", use_container_width=True):
-            start_new_replay()
-            st.rerun()
+        st.button("Start another replay", use_container_width=True, on_click=start_new_replay)
     elif manifest:
-        if st.button("Start a new simulation", use_container_width=True):
-            start_new_replay()
-            st.rerun()
+        st.button("Start a new simulation", use_container_width=True, on_click=start_new_replay)
     st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:1rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
 
 selected_page = st.session_state.get("selected_page", "Overview")
