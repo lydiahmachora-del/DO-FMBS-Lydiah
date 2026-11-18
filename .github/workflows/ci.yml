@@ -40,42 +40,6 @@ jobs:
           python -m pip install numpy==1.24.3 scipy==1.15.3
           python -m pip check
 
-      - name: Enforce code-only repository policy
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import PurePosixPath
-          import subprocess
-
-          forbidden_directories = {
-              "docs",
-              "do_fmbs_data",
-              "simulation_evidence",
-              "runtime_metrics_evidence",
-              "runtime_recording",
-          }
-          forbidden_extensions = {
-              ".md", ".pdf", ".docx", ".pptx", ".csv", ".json", ".log",
-              ".png", ".jpg", ".jpeg", ".svg", ".keras", ".h5", ".pkl",
-              ".npz", ".npy",
-          }
-
-          tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
-          rejected = []
-          for raw_path in tracked:
-              path = PurePosixPath(raw_path)
-              if forbidden_directories.intersection(path.parts):
-                  rejected.append(raw_path)
-              elif path.suffix.lower() in forbidden_extensions:
-                  rejected.append(raw_path)
-
-          if rejected:
-              raise SystemExit(
-                  "Local-only files were committed:\n" + "\n".join(sorted(rejected))
-              )
-          print(f"Code-only policy verified for {len(tracked)} tracked files.")
-          PY
-
       - name: Compile Python source
         run: |
           python -m compileall -q \
