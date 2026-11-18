@@ -60,11 +60,13 @@ jobs:
             tests.test_instrumented_pipeline_evidence.InstrumentedPipelineUnitTests
 
       - name: Run constrained-model smoke simulation
-        run: python phase6_constrained_dynamic_optimization.py
+        run: python phase6_constrained_dynamic_optimization.py --output-dir "$RUNNER_TEMP/constrained-dynamic-model-smoke"
 
-      - name: Verify smoke outputs remain untracked
+      - name: Verify isolated smoke outputs and clean checkout
         shell: bash
+        env:
+          SMOKE_OUTPUT_DIR: ${{ runner.temp }}/constrained-dynamic-model-smoke
         run: |
-          test -s simulation_evidence/constrained_dynamic_model/model_fit.json
-          test -s simulation_evidence/constrained_dynamic_model/dynamic_optimization_schedule.csv
+          test -s "$SMOKE_OUTPUT_DIR/model_fit.json"
+          test -s "$SMOKE_OUTPUT_DIR/dynamic_optimization_schedule.csv"
           test -z "$(git status --short)"

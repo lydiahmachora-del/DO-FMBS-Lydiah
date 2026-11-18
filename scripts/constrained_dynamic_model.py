@@ -7,6 +7,7 @@ defense/federation policy at each federated round.
 from __future__ import annotations
 
 import csv
+import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -457,8 +458,9 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writeheader(); writer.writerows(rows)
 
 
-def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+def main(output_dir: Path | None = None) -> None:
+    output_dir = output_dir or OUT
+    output_dir.mkdir(parents=True, exist_ok=True)
     rows = generate_observations()
     fit = fit_equation(rows)
     schedule = dynamic_schedule(fit)
@@ -481,13 +483,13 @@ def main() -> None:
             "constraint_satisfied": True if name == "B0" else (
                 fit.coefficients[index] <= 0 if name in {"B_AI", "B_PA"} else fit.coefficients[index] >= 0),
         })
-    write_csv(OUT / "simulation_observations.csv", rows)
-    write_csv(OUT / "coefficient_estimates.csv", coefficient_rows)
-    write_csv(OUT / "dynamic_optimization_schedule.csv", schedule)
-    write_csv(OUT / "cost_weight_sensitivity.csv", sensitivity)
-    write_csv(OUT / "stress_test_scenarios.csv", stresses)
-    write_csv(OUT / "acceptance_ranges.csv", ranges)
-    write_csv(OUT / "constraint_checks.csv", checks)
+    write_csv(output_dir / "simulation_observations.csv", rows)
+    write_csv(output_dir / "coefficient_estimates.csv", coefficient_rows)
+    write_csv(output_dir / "dynamic_optimization_schedule.csv", schedule)
+    write_csv(output_dir / "cost_weight_sensitivity.csv", sensitivity)
+    write_csv(output_dir / "stress_test_scenarios.csv", stresses)
+    write_csv(output_dir / "acceptance_ranges.csv", ranges)
+    write_csv(output_dir / "constraint_checks.csv", checks)
     payload = asdict(fit)
     payload["equation"] = "Y_hat_(t+1) = B0 + B_AI*AI_t + B_PA*PA_t + B_DM*DM_t + B_GS*GS_t"
     payload["constraints_satisfied"] = all(row["satisfied"] for row in checks)
@@ -524,7 +526,7 @@ def main() -> None:
         "demonstration. Coefficients are simulation estimates, not neural-network weights or "
         "estimates from 700 independent federated training runs."
     )
-    (OUT / "model_fit.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (output_dir / "model_fit.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps({"coefficients": dict(zip(fit.names, fit.coefficients)),
                       "r_squared": fit.r_squared, "adjusted_r_squared": fit.adjusted_r_squared,
                       "cv_r2": fit.cross_validation_r2_mean,
@@ -534,4 +536,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the constrained dynamic simulation.")
+    parser.add_argument("--output-dir", type=Path, default=OUT,
+                        help="Directory for simulation evidence (defaults to the repository evidence folder).")
+    main(parser.parse_args().output_dir)
