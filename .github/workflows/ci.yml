@@ -60,15 +60,15 @@ jobs:
             tests.test_instrumented_pipeline_evidence.InstrumentedPipelineUnitTests
 
       - name: Run constrained-model smoke simulation
-        run: python phase6_constrained_dynamic_optimization.py --output-dir "$RUNNER_TEMP/constrained-dynamic-model-smoke"
+        env:
+          SMOKE_OUTPUT_DIR: ${{ runner.temp }}/constrained-dynamic-model-smoke
+        run: python phase6_constrained_dynamic_optimization.py --output-dir "$SMOKE_OUTPUT_DIR"
 
       - name: Verify isolated smoke outputs and model constraints
         shell: bash
         env:
           SMOKE_OUTPUT_DIR: ${{ runner.temp }}/constrained-dynamic-model-smoke
         run: |
-          test -s "$SMOKE_OUTPUT_DIR/model_fit.json"
-          test -s "$SMOKE_OUTPUT_DIR/dynamic_optimization_schedule.csv"
           python - <<'PY'
           import csv
           import json
@@ -77,11 +77,15 @@ jobs:
 
           output_dir = Path(os.environ["SMOKE_OUTPUT_DIR"]).resolve()
           workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          fit_path = output_dir / "model_fit.json"
+          schedule_path = output_dir / "dynamic_optimization_schedule.csv"
+          if not fit_path.is_file() or not schedule_path.is_file():
+              raise SystemExit(f"Smoke outputs are missing from {output_dir}.")
           if output_dir.is_relative_to(workspace):
               raise SystemExit("Smoke evidence must be written outside the checkout.")
 
-          fit = json.loads((output_dir / "model_fit.json").read_text())
-          with (output_dir / "dynamic_optimization_schedule.csv").open(newline="") as stream:
+          fit = json.loads(fit_path.read_text())
+          with schedule_path.open(newline="") as stream:
               schedule = list(csv.DictReader(stream))
           if not fit["constraints_satisfied"] or len(schedule) != 12:
               raise SystemExit("Smoke evidence is incomplete or violates model constraints.")
