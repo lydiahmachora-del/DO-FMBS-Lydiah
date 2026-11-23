@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+
+from phase1_evidence import inspect_phase1_artifacts
 
 
 ROOT = Path(__file__).resolve().parent
@@ -111,6 +114,102 @@ def load_json(path: Path) -> dict | None:
         return read_json(str(path), path.stat().st_mtime_ns)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def phase1_artifact_root(manifest: dict | None, run_dir: Path | None) -> Path | None:
+    if run_dir is not None:
+        return run_dir / "do_fmbs_data"
+    if manifest:
+        replay_root = manifest.get("authoritative_replay_root")
+        if replay_root:
+            return ROOT / replay_root / "do_fmbs_data"
+    return None
+
+
+def phase1_signature(data_dir: Path) -> tuple:
+    names = ["phase1_metadata.json", "face_data.npz", "fingerprint_data.npz", "face_scaler.npz",
+             "fingerprint_scaler.npz", "client_partition.json"]
+    names.extend(f"clients/client_{index}.npz" for index in range(5))
+    signature = []
+    for name in names:
+        path = data_dir / name
+        try:
+            info = path.stat()
+            signature.append((name, info.st_mtime_ns, info.st_size))
+        except OSError:
+            signature.append((name, None, None))
+    return tuple(signature)
+
+
+@st.cache_data(show_spinner="Verifying saved Phase 1 artifacts...")
+def cached_phase1_inspection(data_dir_string: str, signature: tuple) -> dict:
+    del signature
+    return inspect_phase1_artifacts(Path(data_dir_string))
+
+
+@st.cache_data(show_spinner=False)
+def cached_sha256(path_string: str, modified_ns: int, size: int) -> str:
+    del modified_ns, size
+    digest = hashlib.sha256()
+    with Path(path_string).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def phase1_artifact_status_rows(data_dir: Path, manifest: dict | None,
+                                inspection: dict) -> list[dict[str, str]]:
+    artifacts = [
+        ("Face dataset", "face_data.npz", "face"),
+        ("Fingerprint dataset", "fingerprint_data.npz", "fingerprint"),
+        ("Face scaler", "face_scaler.npz", "face_scaler"),
+        ("Fingerprint scaler", "fingerprint_scaler.npz", "fingerprint_scaler"),
+        ("Client partition metadata", "client_partition.json", "clients"),
+        *[(f"Client {index} data", f"clients/client_{index}.npz", "clients") for index in range(5)],
+        ("Phase 1 metadata", "phase1_metadata.json", "metadata"),
+        ("Fingerprint identity templates", "fingerprint_identity_templates.json", "unverified"),
+        ("Fingerprint quality diagnostics", "fingerprint_quality_diagnostics.json", "quality"),
+        ("Face training preview", "figures/face_training_samples.png", "unverified"),
+        ("Fingerprint identity preview", "figures/fingerprint_same_identity_grid.png", "unverified"),
+        ("Fingerprint quality preview", "figures/fingerprint_similarity_distributions.png", "unverified"),
+        ("Client distribution figure", "figures/federated_client_distribution.png", "unverified"),
+    ]
+    checks = {row["check"]: row["status"] == "PASS" for row in inspection.get("checks", [])}
+    manifest_entries = manifest.get("artifacts", []) if manifest else []
+    rows = []
+    for label, relative, verification_key in artifacts:
+        path = data_dir / relative
+        if not path.is_file():
+            status = "Missing"
+        else:
+            manifest_entry = next((item for item in manifest_entries
+                                   if item.get("path", "").endswith(f"/do_fmbs_data/{relative.replace(chr(92), '/')}")
+                                   or item.get("path", "").endswith(f"do_fmbs_data/{relative.replace(chr(92), '/')}")
+                                   or item.get("path", "").endswith(f"/{relative.replace(chr(92), '/')}")
+                                   ), None)
+            if manifest_entry:
+                try:
+                    info = path.stat()
+                    actual = cached_sha256(str(path), info.st_mtime_ns, info.st_size)
+                    status = "Present · manifest hash verified" if actual == manifest_entry.get("sha256") else "Present · hash mismatch"
+                except OSError:
+                    status = "Present · hash not verified"
+            elif verification_key in {"face", "fingerprint"}:
+                status = "Present · structural checks passed" if checks.get(f"{verification_key} structure") and checks.get(f"{verification_key} split coverage") else "Present · verification failed"
+            elif verification_key.endswith("_scaler"):
+                modality = verification_key.removesuffix("_scaler")
+                status = "Present · training-only fit verified" if checks.get(f"{modality} scaler") else "Present · verification failed"
+            elif verification_key == "clients":
+                status = "Present · client consistency verified" if inspection.get("clients_verified") else "Present · verification failed"
+            elif verification_key == "metadata":
+                status = "Present · metadata consistency checked" if checks.get("Phase 1 metadata") else "Present · verification failed"
+            elif verification_key == "quality":
+                payload = load_json(path)
+                status = "Present · quality gate passed" if payload and payload.get("passed") is True else "Present · not verified / gate failed"
+            else:
+                status = "Present · not content-verified"
+        rows.append({"Artifact": label, "File": relative, "Status": status})
+    return rows
 
 
 def percent(value: object, digits: int = 2) -> str:
@@ -310,30 +409,114 @@ def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path 
         return
 
     if phase_number == 1:
-        st.subheader("Dataset and preparation evidence")
-        stats = manifest["dataset_statistics"]
-        rows = []
+        data_dir = phase1_artifact_root(manifest, run_dir)
+        if data_dir is None:
+            st.info("Start a replay to inspect its persisted Phase 1 datasets and evidence.")
+            return
+        inspection = cached_phase1_inspection(str(data_dir), phase1_signature(data_dir))
+        metadata = load_json(data_dir / "phase1_metadata.json") or {}
+        st.subheader("Dataset acquisition and provenance")
+        st.write("Face data uses public LFW samples loaded with scikit-learn. Fingerprints are generated locally from deterministic synthetic identity templates; no fingerprint dataset is downloaded or imported.")
+        st.caption("LFW loader cache/download outcome was not recorded for this replay. This page reads saved artifacts only and will not trigger a dataset fetch.")
+
+        summaries = inspection.get("datasets", {})
+        overview_rows = []
         for modality in ("face", "fingerprint"):
-            value = stats[modality]
-            rows.append({"Modality": modality.title(), "Source": value["source"], "Identities": value["identities"],
-                         "Total": value["total"], "Train": value["train"], "Calibration": value["calibration"],
-                         "Final test": value["test"], "Scaler": value["scaler_fit"]})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        quality = stats["fingerprint"]["quality_gate"]
-        st.markdown("#### Fingerprint identity quality gate")
-        metric_card_row([
-            ("Same identity mean", f"{quality['same_identity_similarity_mean']:.3f}"),
-            ("Different identity mean", f"{quality['different_identity_similarity_mean']:.3f}"),
-            ("Inter/intra distance ratio", f"{quality['inter_to_intra_distance_ratio']:.2f}"),
-            ("Nearest-neighbour accuracy", percent(quality["nearest_neighbour_identity_accuracy"])),
-            ("Gate", "PASS" if quality["passed"] else "FAIL"),
-        ])
-        cols = st.columns(2)
-        for col, suffix, title in zip(cols, ("fingerprint_same_identity_grid.png", "fingerprint_similarity_distributions.png"),
-                                      ("Persistent synthetic identity examples", "Fingerprint separability check")):
-            image = artifact_path(manifest, suffix)
-            if image:
-                col.image(str(image), caption=title, use_container_width=True)
+            value = summaries.get(modality)
+            if not value:
+                continue
+            recorded = metadata.get(modality, {})
+            overview_rows.append({
+                "Modality": modality.title(),
+                "Data source": recorded.get("source", value["source"]),
+                "Acquisition": value["acquisition"],
+                "Samples": value["samples"], "Identities": value["identities"],
+                "Image dimensions": " × ".join(map(str, value["image_shape"])),
+                "Flattened features": value["features"],
+                "Representation": value["representation"],
+            })
+        st.subheader("Dataset overview")
+        if overview_rows:
+            st.dataframe(pd.DataFrame(overview_rows), use_container_width=True, hide_index=True)
+        else:
+            st.warning("No readable Phase 1 dataset archives are available in this replay yet.")
+
+        st.subheader("Preprocessing actually performed")
+        left, right = st.columns(2)
+        left.markdown("**Face**\n\n1. Load LFW through `fetch_lfw_people`.\n2. Create stratified train/calibration/test partitions.\n3. Flatten 50 × 37 grayscale images to 1,850 features.\n4. Fit `StandardScaler` on training samples only; transform train, calibration, and test data.\n5. Persist transformed arrays, original images, labels, source indices, and scaler statistics.")
+        right.markdown("**Fingerprint**\n\n1. Generate deterministic identity templates and eight varied impressions per identity.\n2. Run the identity-separability quality gate.\n3. Split impressions 0–4 / 5 / 6–7 into train/calibration/test.\n4. Flatten 96 × 96 grayscale images to 9,216 features.\n5. Fit `StandardScaler` on training samples only; transform all partitions and persist arrays, labels, indices, and scaler statistics.")
+        seeds = metadata.get("seeds", {})
+        partition_metadata = load_json(data_dir / "client_partition.json") or {}
+        seed_cols = st.columns(4)
+        for column, label, value in zip(seed_cols,
+                                        ("Global seed", "Face split seed", "Client partition seed", "Fingerprint identity / impression seeds"),
+                                        (seeds.get("global", "Not recorded"), seeds.get("face_split", "Not recorded"),
+                                         partition_metadata.get("seed", "Not recorded"),
+                                         f"{seeds.get('fingerprint_identity_base', '—')} / {seeds.get('fingerprint_impression_base', '—')}")):
+            column.metric(label, str(value))
+
+        st.subheader("Train / calibration / test distribution")
+        split_rows = [{"Modality": name.title(), **value.get("splits", {})}
+                      for name, value in summaries.items()]
+        if split_rows:
+            split_frame = pd.DataFrame(split_rows).set_index("Modality")
+            st.bar_chart(split_frame, height=240)
+            st.dataframe(split_frame.reset_index(), use_container_width=True, hide_index=True)
+        st.caption("Face partitions are stratified 70/15/15 (split seed shown above). Fingerprints use five training, one calibration, and two final-test impressions per identity.")
+
+        st.subheader("Persisted face examples")
+        previews = inspection.get("face_previews", [])
+        if previews:
+            for offset in range(0, len(previews), 4):
+                columns = st.columns(min(4, len(previews) - offset))
+                for column, preview in zip(columns, previews[offset:offset + 4]):
+                    column.image(preview["image"], caption=preview["caption"], use_container_width=True)
+        else:
+            st.info("Face sample previews are unavailable because the persisted raw training images are missing.")
+
+        st.subheader("Synthetic fingerprint identity quality")
+        quality = (metadata.get("fingerprint", {}).get("quality_gate")
+                   or load_json(data_dir / "fingerprint_quality_diagnostics.json") or {})
+        if quality:
+            metric_card_row([
+                ("Same identity mean", f"{quality.get('same_identity_similarity_mean', 0):.3f}"),
+                ("Different identity mean", f"{quality.get('different_identity_similarity_mean', 0):.3f}"),
+                ("Inter/intra distance ratio", f"{quality.get('inter_to_intra_distance_ratio', 0):.2f}"),
+                ("Nearest-neighbour accuracy", percent(quality.get("nearest_neighbour_identity_accuracy", 0))),
+                ("Gate", "PASS" if quality.get("passed") else "FAIL / unknown"),
+            ])
+        finger_cols = st.columns(2)
+        for column, relative, title in zip(finger_cols,
+                                           ("figures/fingerprint_same_identity_grid.png", "figures/fingerprint_similarity_distributions.png"),
+                                           ("Persisted synthetic impressions", "Persisted identity-separability plot")):
+            path = data_dir / relative
+            if path.is_file():
+                column.image(str(path), caption=title, use_container_width=True)
+            else:
+                column.info(f"Optional artifact missing: {Path(relative).name}")
+
+        st.subheader("Identity-exclusive client allocation")
+        if inspection.get("clients"):
+            client_frame = pd.DataFrame(inspection["clients"])
+            st.bar_chart(client_frame.set_index("Client")[
+                ["Face samples", "Fingerprint samples", "Face identities", "Fingerprint identities"]
+            ], height=280)
+            st.dataframe(client_frame, use_container_width=True, hide_index=True)
+            st.caption("Bars use counts read from the saved five client NPZ files. Unequal face sample counts are preserved; face and fingerprint identities are allocated independently.")
+        else:
+            st.warning("Client distribution cannot be shown because persisted client artifacts are unavailable.")
+
+        st.subheader("Phase 1 verification")
+        if inspection.get("status") == "PASS":
+            st.success("All available Phase 1 structural, split, scaler, metadata, and client checks passed.")
+        else:
+            st.warning("Some Phase 1 evidence is missing or failed verification; review the check table before relying on it.")
+        st.dataframe(pd.DataFrame(inspection.get("checks", [])), use_container_width=True, hide_index=True)
+
+        st.subheader("Phase 1 artifact status")
+        st.caption("A file is not marked verified based on existence alone. Accepted replay files are checked against manifest SHA-256 when a matching manifest entry exists; otherwise status reflects the specific structural check shown.")
+        st.dataframe(pd.DataFrame(phase1_artifact_status_rows(data_dir, manifest, inspection)),
+                     use_container_width=True, hide_index=True)
 
     elif phase_number == 2:
         fed = manifest["federated_learning"]
