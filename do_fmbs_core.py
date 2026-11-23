@@ -29,6 +29,62 @@ FINGERPRINT_IMPRESSION_SEED = 91009
 CLIENT_PARTITION_SEED = 5201
 BOOTSTRAP_SEED = 6201
 
+FINGERPRINT_GENERATION_CONFIG: dict[str, object] = {
+    "identities": 100, "impressions_per_identity": 8, "image_shape": [96, 96],
+    "random_generator": "numpy.random.Generator(numpy.random.PCG64(seed))",
+    "identity_seed": {"base": FINGERPRINT_IDENTITY_SEED, "identity_stride": 1009,
+                       "formula": "base + identity_stride * identity_id"},
+    "impression_seed": {"base": FINGERPRINT_IMPRESSION_SEED,
+                         "identity_stride": 10007, "impression_stride": 101,
+                         "formula": "base + identity_stride * identity_id + impression_stride * impression_id",
+                         "draw_order": ["orientation_delta_radians", "frequency_fractional_delta", "remaining acquisition variations"]},
+    "normalization": {"scope": "each completed impression independently",
+                      "formula": "(pixel - impression_min) / (impression_max - impression_min) * 255",
+                      "quantization": "numpy.rint: nearest integer, ties to even, then uint8",
+                      "constant_impression": "all-zero uint8 image",
+                      "final_clipping": "none; min-max scaling bounds finite nonconstant values"},
+    "identity_template": {
+        "minutiae_count": 5, "minutiae_x": [-0.62, 0.62], "minutiae_y": [-0.72, 0.72],
+        "minutiae_radius": [0.10, 0.24], "minutiae_phase_shift": [-0.42, 0.42],
+        "base_orientation_radians": [-1.10, 1.10], "ridge_frequency": [5.3, 8.1],
+        "core_x": [-0.25, 0.25], "core_y": [-0.30, 0.20],
+        "curvature": [-0.34, 0.34], "swirl": [-0.22, 0.22],
+        "phase_offset_radians": [0.0, 6.283185307179586], "warp_x": [0.10, 0.32],
+        "warp_y": [0.10, 0.32], "warp_phase_radians": [0.0, 6.283185307179586],
+        "ellipticity": [0.82, 1.12],
+    },
+    "identity_field": {"coordinate_warp_amplitude": 0.055,
+                       "warp_x_angular_frequency_pi": 2.4, "warp_y_angular_frequency_pi": 2.0,
+                       "minutiae_amplitude": 0.055, "ridge_tanh_scale": 3.2,
+                       "minutiae_gaussian_denominator_factor": 2.0,
+                       "ridge_phase_frequency_factor": 2.0,
+                       "contact_ellipse_outer": 1.12, "contact_ellipse_width": 0.22,
+                       "background_level": 0.93, "background_gradient": 0.025, "radial_epsilon": 1e-6},
+    "impression_perturbations": {
+        "orientation_delta_radians": [-0.02617993877991494, 0.02617993877991494],
+        "orientation_delta_degrees": [-1.5, 1.5],
+        "orientation_formula": "base_orientation + first impression-RNG uniform draw",
+        "frequency_fractional_delta": [-0.01, 0.01],
+        "frequency_formula": "base_frequency * (1 + second impression-RNG uniform draw)",
+        "assumption": "Conservative researcher-approved bounds, not fitted or performance-optimized parameters.",
+    },
+    "acquisition_variation": {
+        "rotation_degrees": [-1.15, 1.15], "shift_pixels_yx": [-1.1, 1.1],
+        "rigid_interpolation_order": 1, "boundary_mode": "nearest",
+        "deformation_grid_shape": [7, 7], "deformation_noise_mean": 0.0,
+        "deformation_noise_std": 1.0, "deformation_zoom_order": 3,
+        "deformation_zoom_grid_divisor": 7.0,
+        "deformation_smoothing_sigma": 4.0, "deformation_displacement_std_pixels": 0.65,
+        "deformation_std_epsilon": 1e-8, "contrast": [0.90, 1.10],
+        "brightness": [-0.025, 0.025], "gamma": [0.92, 1.08],
+        "pre_blur_clip": [0.0, 1.0], "blur_sigma": [0.45, 0.82],
+        "sensor_noise_mean": 0.0, "sensor_noise_std": [0.012, 0.030],
+        "contact_center_x_y": [-0.035, 0.035], "contact_scale_x": 1.02,
+        "contact_scale_y": 1.08, "contact_mask_outer": 1.16,
+        "contact_mask_width": 0.18, "contact_background": 0.94,
+    },
+}
+
 
 def set_global_determinism(seed: int = GLOBAL_SEED) -> None:
     """Set reproducible Python/NumPy/TensorFlow seeds where available."""
@@ -63,26 +119,30 @@ def sha256(path: Path | str) -> str:
 
 
 def identity_seed(finger_id: int) -> int:
-    return FINGERPRINT_IDENTITY_SEED + 1009 * int(finger_id)
+    seed = FINGERPRINT_GENERATION_CONFIG["identity_seed"]
+    return int(seed["base"]) + int(seed["identity_stride"]) * int(finger_id)
 
 
 def impression_seed(finger_id: int, impression: int) -> int:
-    return FINGERPRINT_IMPRESSION_SEED + 10007 * int(finger_id) + 101 * int(impression)
+    seed = FINGERPRINT_GENERATION_CONFIG["impression_seed"]
+    return (int(seed["base"]) + int(seed["identity_stride"]) * int(finger_id)
+            + int(seed["impression_stride"]) * int(impression))
 
 
 def create_fingerprint_identity_template(
     finger_id: int, height: int = 96, width: int = 96
 ) -> dict[str, object]:
     """Create persistent ridge parameters for exactly one synthetic finger."""
-    rng = np.random.default_rng(identity_seed(finger_id))
+    cfg = FINGERPRINT_GENERATION_CONFIG["identity_template"]
+    rng = np.random.Generator(np.random.PCG64(identity_seed(finger_id)))
     minutiae = []
-    for _ in range(5):
+    for _ in range(int(cfg["minutiae_count"])):
         minutiae.append(
             {
-                "x": float(rng.uniform(-0.62, 0.62)),
-                "y": float(rng.uniform(-0.72, 0.72)),
-                "radius": float(rng.uniform(0.10, 0.24)),
-                "phase_shift": float(rng.uniform(-0.42, 0.42)),
+                "x": float(rng.uniform(*cfg["minutiae_x"])),
+                "y": float(rng.uniform(*cfg["minutiae_y"])),
+                "radius": float(rng.uniform(*cfg["minutiae_radius"])),
+                "phase_shift": float(rng.uniform(*cfg["minutiae_phase_shift"])),
             }
         )
     return {
@@ -90,50 +150,55 @@ def create_fingerprint_identity_template(
         "identity_seed": identity_seed(finger_id),
         "height": int(height),
         "width": int(width),
-        "base_orientation": float(rng.uniform(-1.10, 1.10)),
-        "ridge_frequency": float(rng.uniform(5.3, 8.1)),
-        "core_x": float(rng.uniform(-0.25, 0.25)),
-        "core_y": float(rng.uniform(-0.30, 0.20)),
-        "curvature": float(rng.uniform(-0.34, 0.34)),
-        "swirl": float(rng.uniform(-0.22, 0.22)),
-        "phase_offset": float(rng.uniform(0.0, 2.0 * np.pi)),
-        "warp_x": float(rng.uniform(0.10, 0.32)),
-        "warp_y": float(rng.uniform(0.10, 0.32)),
-        "warp_phase": float(rng.uniform(0.0, 2.0 * np.pi)),
-        "ellipticity": float(rng.uniform(0.82, 1.12)),
+        "base_orientation": float(rng.uniform(*cfg["base_orientation_radians"])),
+        "ridge_frequency": float(rng.uniform(*cfg["ridge_frequency"])),
+        "core_x": float(rng.uniform(*cfg["core_x"])),
+        "core_y": float(rng.uniform(*cfg["core_y"])),
+        "curvature": float(rng.uniform(*cfg["curvature"])),
+        "swirl": float(rng.uniform(*cfg["swirl"])),
+        "phase_offset": float(rng.uniform(*cfg["phase_offset_radians"])),
+        "warp_x": float(rng.uniform(*cfg["warp_x"])),
+        "warp_y": float(rng.uniform(*cfg["warp_y"])),
+        "warp_phase": float(rng.uniform(*cfg["warp_phase_radians"])),
+        "ellipticity": float(rng.uniform(*cfg["ellipticity"])),
         "minutiae": minutiae,
     }
 
 
-def _render_identity_field(template: dict[str, object]) -> np.ndarray:
+def _render_identity_field(
+    template: dict[str, object], orientation_delta: float = 0.0,
+    frequency_fractional_delta: float = 0.0,
+) -> np.ndarray:
+    field_cfg = FINGERPRINT_GENERATION_CONFIG["identity_field"]
     height = int(template["height"])
     width = int(template["width"])
     yy, xx = np.mgrid[-1:1:complex(height), -1:1:complex(width)]
     x = xx - float(template["core_x"])
     y = yy - float(template["core_y"])
-    angle = float(template["base_orientation"])
+    angle = float(template["base_orientation"]) + orientation_delta
     u = x * np.cos(angle) + y * np.sin(angle)
     v = -x * np.sin(angle) + y * np.cos(angle)
-    radial = np.sqrt(x * x + y * y) + 1e-6
+    radial = np.sqrt(x * x + y * y) + field_cfg["radial_epsilon"]
     polar = np.arctan2(v, u)
 
     coordinate = (
         u
         + float(template["curvature"]) * v * v
         + float(template["swirl"]) * radial * polar / np.pi
-        + float(template["warp_x"]) * 0.055 * np.sin(2.4 * np.pi * x + float(template["warp_phase"]))
-        + float(template["warp_y"]) * 0.055 * np.sin(2.0 * np.pi * y - float(template["warp_phase"]))
+        + float(template["warp_x"]) * field_cfg["coordinate_warp_amplitude"] * np.sin(field_cfg["warp_x_angular_frequency_pi"] * np.pi * x + float(template["warp_phase"]))
+        + float(template["warp_y"]) * field_cfg["coordinate_warp_amplitude"] * np.sin(field_cfg["warp_y_angular_frequency_pi"] * np.pi * y - float(template["warp_phase"]))
     )
     for point in template["minutiae"]:
         distance2 = (xx - point["x"]) ** 2 + (yy - point["y"]) ** 2
-        coordinate += point["phase_shift"] * 0.055 * np.exp(-distance2 / (2.0 * point["radius"] ** 2))
+        coordinate += point["phase_shift"] * field_cfg["minutiae_amplitude"] * np.exp(-distance2 / (field_cfg["minutiae_gaussian_denominator_factor"] * point["radius"] ** 2))
 
-    phase = 2.0 * np.pi * float(template["ridge_frequency"]) * coordinate + float(template["phase_offset"])
+    frequency = float(template["ridge_frequency"]) * (1.0 + frequency_fractional_delta)
+    phase = field_cfg["ridge_phase_frequency_factor"] * np.pi * frequency * coordinate + float(template["phase_offset"])
     ridge = 0.5 + 0.5 * np.cos(phase)
-    ridge = 0.5 + 0.5 * np.tanh((ridge - 0.5) * 3.2)
+    ridge = 0.5 + 0.5 * np.tanh((ridge - 0.5) * field_cfg["ridge_tanh_scale"])
     ellipse = (xx / float(template["ellipticity"])) ** 2 + (yy * float(template["ellipticity"])) ** 2
-    contact = np.clip((1.12 - ellipse) / 0.22, 0.0, 1.0)
-    background = 0.93 + 0.025 * (xx + yy)
+    contact = np.clip((field_cfg["contact_ellipse_outer"] - ellipse) / field_cfg["contact_ellipse_width"], 0.0, 1.0)
+    background = field_cfg["background_level"] + field_cfg["background_gradient"] * (xx + yy)
     return ridge * contact + background * (1.0 - contact)
 
 
@@ -142,53 +207,72 @@ def render_fingerprint_impression(
 ) -> np.ndarray:
     """Render a controlled acquisition variation of a persistent identity."""
     finger_id = int(template["finger_id"])
-    rng = np.random.default_rng(impression_seed(finger_id, impression))
-    base = _render_identity_field(template)
+    rng = np.random.Generator(np.random.PCG64(impression_seed(finger_id, impression)))
+    perturb_cfg = FINGERPRINT_GENERATION_CONFIG["impression_perturbations"]
+    orientation_delta = float(rng.uniform(*perturb_cfg["orientation_delta_radians"]))
+    frequency_delta = float(rng.uniform(*perturb_cfg["frequency_fractional_delta"]))
+    base = _render_identity_field(template, orientation_delta, frequency_delta)
     height, width = base.shape
+    acq = FINGERPRINT_GENERATION_CONFIG["acquisition_variation"]
 
     # Modest rigid acquisition variation.
     rotated = ndimage.rotate(
         base,
-        angle=float(rng.uniform(-1.15, 1.15)),
+        angle=float(rng.uniform(*acq["rotation_degrees"])),
         reshape=False,
-        order=1,
-        mode="nearest",
+        order=int(acq["rigid_interpolation_order"]),
+        mode=acq["boundary_mode"],
     )
     shifted = ndimage.shift(
         rotated,
-        shift=(float(rng.uniform(-1.1, 1.1)), float(rng.uniform(-1.1, 1.1))),
-        order=1,
-        mode="nearest",
+        shift=tuple(float(x) for x in rng.uniform(*acq["shift_pixels_yx"], size=2)),
+        order=int(acq["rigid_interpolation_order"]),
+        mode=acq["boundary_mode"],
     )
 
     # Smooth sensor/contact deformation; displacement stays below one pixel.
-    coarse_y = rng.normal(0.0, 1.0, (7, 7))
-    coarse_x = rng.normal(0.0, 1.0, (7, 7))
-    zoom = (height / 7.0, width / 7.0)
-    dy = ndimage.zoom(coarse_y, zoom, order=3)[:height, :width]
-    dx = ndimage.zoom(coarse_x, zoom, order=3)[:height, :width]
-    dy = ndimage.gaussian_filter(dy, 4.0)
-    dx = ndimage.gaussian_filter(dx, 4.0)
-    dy = 0.65 * dy / (np.std(dy) + 1e-8)
-    dx = 0.65 * dx / (np.std(dx) + 1e-8)
+    grid_shape = tuple(int(v) for v in acq["deformation_grid_shape"])
+    coarse_y = rng.normal(acq["deformation_noise_mean"], acq["deformation_noise_std"], grid_shape)
+    coarse_x = rng.normal(acq["deformation_noise_mean"], acq["deformation_noise_std"], grid_shape)
+    zoom = (height / acq["deformation_zoom_grid_divisor"], width / acq["deformation_zoom_grid_divisor"])
+    dy = ndimage.zoom(coarse_y, zoom, order=int(acq["deformation_zoom_order"]))[:height, :width]
+    dx = ndimage.zoom(coarse_x, zoom, order=int(acq["deformation_zoom_order"]))[:height, :width]
+    dy = ndimage.gaussian_filter(dy, acq["deformation_smoothing_sigma"])
+    dx = ndimage.gaussian_filter(dx, acq["deformation_smoothing_sigma"])
+    dy = acq["deformation_displacement_std_pixels"] * dy / (np.std(dy) + acq["deformation_std_epsilon"])
+    dx = acq["deformation_displacement_std_pixels"] * dx / (np.std(dx) + acq["deformation_std_epsilon"])
     grid_y, grid_x = np.mgrid[0:height, 0:width]
     image = ndimage.map_coordinates(shifted, [grid_y + dy, grid_x + dx], order=1, mode="nearest")
 
     # Pressure, illumination, blur, and sensor noise vary by impression.
-    contrast = float(rng.uniform(0.90, 1.10))
-    brightness = float(rng.uniform(-0.025, 0.025))
-    gamma = float(rng.uniform(0.92, 1.08))
-    image = np.clip((image - 0.5) * contrast + 0.5 + brightness, 0.0, 1.0) ** gamma
-    image = ndimage.gaussian_filter(image, sigma=float(rng.uniform(0.45, 0.82)))
-    image += rng.normal(0.0, float(rng.uniform(0.012, 0.030)), image.shape)
+    contrast = float(rng.uniform(*acq["contrast"]))
+    brightness = float(rng.uniform(*acq["brightness"]))
+    gamma = float(rng.uniform(*acq["gamma"]))
+    image = np.clip((image - 0.5) * contrast + 0.5 + brightness, *acq["pre_blur_clip"]) ** gamma
+    image = ndimage.gaussian_filter(image, sigma=float(rng.uniform(*acq["blur_sigma"])))
+    image += rng.normal(acq["sensor_noise_mean"], float(rng.uniform(*acq["sensor_noise_std"])), image.shape)
 
     # A weak shifted contact mask permits partial edge contact without erasing
     # the core ridge field.
     yy, xx = np.mgrid[-1:1:complex(height), -1:1:complex(width)]
-    cx, cy = rng.uniform(-0.035, 0.035, size=2)
-    mask = np.clip((1.16 - ((xx - cx) / 1.02) ** 2 - ((yy - cy) / 1.08) ** 2) / 0.18, 0.0, 1.0)
-    image = image * mask + 0.94 * (1.0 - mask)
-    return np.uint8(np.round(np.clip(image, 0.0, 1.0) * 255.0))
+    cx, cy = rng.uniform(*acq["contact_center_x_y"], size=2)
+    mask = np.clip((acq["contact_mask_outer"] - ((xx - cx) / acq["contact_scale_x"]) ** 2 - ((yy - cy) / acq["contact_scale_y"]) ** 2) / acq["contact_mask_width"], 0.0, 1.0)
+    image = image * mask + acq["contact_background"] * (1.0 - mask)
+    return minmax_to_uint8(image)
+
+
+def minmax_to_uint8(image: np.ndarray) -> np.ndarray:
+    """Scale one impression's observed range linearly to the 8-bit range."""
+    values = np.asarray(image, dtype=np.float64)
+    minimum = float(np.min(values))
+    maximum = float(np.max(values))
+    normalization = FINGERPRINT_GENERATION_CONFIG["normalization"]
+    if maximum == minimum and normalization["constant_impression"] == "all-zero uint8 image":
+        return np.zeros(values.shape, dtype=np.uint8)
+    if maximum == minimum:
+        raise ValueError("Unsupported constant-impression normalization policy")
+    scaled = (values - minimum) / (maximum - minimum)
+    return np.rint(scaled * 255.0).astype(np.uint8)
 
 
 def generate_fingerprint_dataset(

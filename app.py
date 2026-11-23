@@ -11,9 +11,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 from phase1_evidence import inspect_phase1_artifacts
+from phase1_reimplementation_evidence import inspect_phase1 as inspect_rebuilt_phase1
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,7 +27,7 @@ RUN_ROOT = ROOT / "runtime_recording"
 
 PHASES = [
     {
-        "number": 1, "name": "Data preparation", "page": "Phase 1 · Data",
+        "number": 1, "name": "Data preparation", "page": "Phase 1 · Data (Legacy)",
         "purpose": "Prepare the face and fingerprint datasets, fit preprocessing on training data, and verify the synthetic fingerprint identities before training.",
         "inputs": "LFW face images and seeded fingerprint identity templates.",
         "outputs": "Train/calibration/test partitions, train-only scalers, client partitions, and the fingerprint quality gate.",
@@ -68,6 +70,8 @@ PHASES = [
     },
 ]
 PAGE_OPTIONS = ["Overview", *[phase["page"] for phase in PHASES], "Evidence & provenance"]
+PHASE1_REBUILD_PAGE = "Phase 1 · Chapter Four (Authoritative)"
+PAGE_OPTIONS.append(PHASE1_REBUILD_PAGE)
 
 st.set_page_config(page_title="DO-FMBS | Simulation workspace", page_icon="🧬", layout="wide")
 st.markdown("""
@@ -409,6 +413,7 @@ def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path 
         return
 
     if phase_number == 1:
+        st.warning("Legacy Phase 1 view. Its train-only scaler and three-way split are not the submitted Chapter Four protocol. Use ‘Phase 1 · Chapter Four (Authoritative)’ for the source-controlled implementation and persisted corrected replay.")
         data_dir = phase1_artifact_root(manifest, run_dir)
         if data_dir is None:
             st.info("Start a replay to inspect its persisted Phase 1 datasets and evidence.")
@@ -753,6 +758,146 @@ def render_evidence(manifest: dict | None, records: list[dict], manifest_path: P
                        file_name="final_evidence_manifest.json", mime="application/json")
 
 
+def render_phase1_rebuild() -> None:
+    st.title("Phase 1 · Chapter Four implementation (Authoritative)")
+    st.caption("This isolated implementation follows the submitted Chapter Four Phase 1 specification. It is separate from both the historical full-pipeline replay and the legacy Phase 1 dashboard view; it does not launch Phases 2–6.")
+    runs = sorted((path for pattern in ("phase1_reimplementation_*", "phase1_final_candidate_*")
+                   for path in RUN_ROOT.glob(pattern)
+                   if (path / "phase1_manifest.json").is_file()),
+                  key=lambda path: path.stat().st_mtime, reverse=True)
+    labels = [path.name for path in runs]
+    current = st.session_state.get("phase1_rebuild_dir")
+    if current and Path(current).is_dir() and Path(current).name not in labels:
+        labels.insert(0, Path(current).name)
+    if labels:
+        selected = st.selectbox("Saved Phase 1 replay", labels,
+                                index=labels.index(Path(current).name) if current and Path(current).name in labels else 0)
+        data_dir = RUN_ROOT / selected
+    else:
+        data_dir = Path(current) if current else None
+
+    if st.button("Start final-candidate Phase 1 replay", type="primary", key="start_source_faithful_phase1"):
+        stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
+        output = RUN_ROOT / f"phase1_final_candidate_{stamp}"
+        suffix = 1
+        while output.exists():
+            output = RUN_ROOT / f"phase1_final_candidate_{stamp}_{suffix}"
+            suffix += 1
+        if run_streamed([sys.executable, "-u", str(ROOT / "phase1_reimplementation.py"),
+                           "--output-dir", str(output)], "Fresh Chapter Four Phase 1"):
+            st.session_state["phase1_rebuild_dir"] = str(output)
+            st.rerun()
+        return
+
+    if data_dir is None or not (data_dir / "phase1_manifest.json").is_file():
+        st.info("No isolated Phase 1 rebuild is saved yet. Start one above; the existing historical replay will not be overwritten.")
+        return
+
+    result = inspect_rebuilt_phase1(data_dir)
+    manifest = result.get("manifest", {})
+    metadata = manifest.get("metadata", {})
+    st.subheader("Replay identity and source")
+    st.write(f"Active replay: `{manifest.get('replay_id', 'unknown')}`")
+    st.write(f"Source document SHA-256: `{metadata.get('source_document_sha256', 'not recorded')}`")
+    config = manifest.get("configuration", {})
+    seed_rows = []
+    for source_name, details in config.get("seeds", {}).items():
+        seed_rows.append({"Random source": source_name,
+                          "Seed": details.get("value", details.get("base")),
+                          "Purpose": details.get("purpose"),
+                          "Derivation": details.get("formula", "")})
+    st.subheader("Reproducibility configuration")
+    st.dataframe(pd.DataFrame(seed_rows), use_container_width=True, hide_index=True)
+    st.json(config.get("lfw_acquisition", {}), expanded=False)
+    st.subheader("Approved fingerprint methodology clarification")
+    st.caption(config.get("methodology_clarification", {}).get("document", "Not recorded"))
+    fingerprint_config = config.get("fingerprint_generation", {})
+    st.json({"normalization": fingerprint_config.get("normalization", {}),
+             "identity template": fingerprint_config.get("identity_template", {}),
+             "impression perturbations": fingerprint_config.get("impression_perturbations", {}),
+             "acquisition variation": fingerprint_config.get("acquisition_variation", {})}, expanded=False)
+    st.caption(f"Evidence directory: `{data_dir.relative_to(ROOT).as_posix()}` · replay `{manifest.get('replay_id', 'unknown')}`")
+    st.subheader("Live independent verification")
+    if result["status"] == "PASS":
+        st.success("All Phase 1 checks pass against the persisted files and current SHA-256 values.")
+    else:
+        st.error("One or more Phase 1 checks failed. Review the actual check details below.")
+    st.dataframe(pd.DataFrame(result["checks"]), use_container_width=True, hide_index=True)
+
+    rows = []
+    for modality in ("face", "fingerprint"):
+        item = metadata.get(modality, {})
+        if item:
+            rows.append({"Modality": modality.title(), "Source": item.get("source"),
+                         "Samples": item.get("samples"), "Identities": item.get("identities"),
+                         "Image dimensions": " × ".join(map(str, item.get("image_shape", []))),
+                         "Features": item.get("features"), "Train": item.get("train"), "Test": item.get("test")})
+    st.subheader("Persisted datasets and splits")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.subheader("Preprocessing order and limitation")
+    st.info(metadata.get("preprocessing", "Preprocessing metadata is missing."))
+    st.warning("Full-array scaler leakage: StandardScaler is fitted before the train/test split, so held-out distribution statistics enter preprocessing. This reproduces the submitted Chapter Four procedure; it is disclosed, not endorsed as leakage-free evaluation.")
+
+    st.subheader("Verification partitions")
+    verification_rows = []
+    for modality in ("face", "fingerprint"):
+        item = metadata.get(modality, {})
+        if modality == "face":
+            verification_rows.append({"Modality": "Face", "Eligible identities": item.get("identities"),
+                                      "Calibration genuine": item.get("verification_calibration_genuine"),
+                                      "Evaluation genuine": item.get("verification_evaluation_genuine"),
+                                      "Evaluation impostor claims": item.get("evaluation_impostor_claims")})
+        else:
+            verification_rows.append({"Modality": "Fingerprint", "Eligible identities": item.get("eligible_verification_identities"),
+                                      "Calibration genuine": item.get("calibration_genuine"),
+                                      "Evaluation genuine": item.get("evaluation_genuine"),
+                                      "Calibration impostor claims": item.get("calibration_impostor_claims"),
+                                      "Evaluation impostor claims": item.get("evaluation_impostor_claims")})
+    st.dataframe(pd.DataFrame(verification_rows), use_container_width=True, hide_index=True)
+
+    st.subheader("Persistent identity-exclusive clients")
+    client_frame = pd.DataFrame(result.get("clients", []))
+    if not client_frame.empty:
+        st.bar_chart(client_frame.set_index("Client")[["Face samples", "Fingerprint samples"]])
+        st.dataframe(client_frame, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Client evidence is unavailable or failed validation.")
+
+    st.subheader("Persisted identity-to-label mappings")
+    try:
+        with np.load(data_dir / "face_data.npz", allow_pickle=False) as face_data:
+            face_mapping = pd.DataFrame({
+                "Label": np.arange(len(face_data["target_names"]), dtype=int),
+                "LFW identity": face_data["target_names"].astype(str),
+            })
+        with np.load(data_dir / "fingerprint_data.npz", allow_pickle=False) as finger_data:
+            finger_labels = np.unique(np.concatenate((finger_data["y_train"], finger_data["y_test"])))
+        finger_mapping = pd.DataFrame({"Synthetic identity ID": finger_labels.astype(int),
+                                       "Label": finger_labels.astype(int)})
+        left, right = st.columns(2)
+        left.markdown("**Face identity → label**")
+        left.dataframe(face_mapping, use_container_width=True, hide_index=True, height=360)
+        right.markdown("**Synthetic fingerprint identity → label**")
+        right.dataframe(finger_mapping, use_container_width=True, hide_index=True, height=360)
+    except (OSError, KeyError, ValueError) as error:
+        st.error(f"Could not read persisted identity mappings: {error}")
+
+    st.subheader("Samples from persisted raw arrays")
+    try:
+        face_data = np.load(data_dir / "face_data.npz", allow_pickle=False)
+        finger_data = np.load(data_dir / "fingerprint_data.npz", allow_pickle=False)
+        left, right = st.columns(2)
+        left.image(face_data["images_train"][0], caption="LFW training sample", clamp=True)
+        right.image(finger_data["images_train"][0], caption="Synthetic fingerprint training sample", clamp=True)
+        face_data.close()
+        finger_data.close()
+    except (OSError, KeyError, ValueError) as error:
+        st.error(f"Could not load persisted sample images: {error}")
+
+    st.subheader("Hashed Phase 1 artifacts")
+    st.dataframe(pd.DataFrame(manifest.get("artifacts", [])), use_container_width=True, hide_index=True)
+
+
 manifest, manifest_path = current_manifest()
 run_dir = selected_run_dir()
 records, _registry_path = registry_for(run_dir, manifest)
@@ -782,10 +927,15 @@ with st.sidebar:
     st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:1rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
 
 selected_page = st.session_state.get("selected_page", "Overview")
+if selected_page not in PAGE_OPTIONS:
+    selected_page = "Overview"
+    st.session_state["selected_page"] = selected_page
 if selected_page == "Overview":
     render_overview(manifest, records, run_dir)
 elif selected_page == "Evidence & provenance":
     render_evidence(manifest, records, manifest_path)
+elif selected_page == PHASE1_REBUILD_PAGE:
+    render_phase1_rebuild()
 else:
     phase = next(item for item in PHASES if item["page"] == selected_page)
     render_phase_page(phase, manifest, run_dir, records, done)
