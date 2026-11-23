@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -15,6 +16,36 @@ from phase1_reimplementation import (
     EXPECTED_FACE_CLIENT_SAMPLES,
     EXPECTED_FINGER_CLIENT_SAMPLES,
 )
+
+REQUIRED_GENERATOR_FIELDS = {
+    "dataset": {"identities", "impressions_per_identity", "image_shape_pixels_yx", "output_dtype"},
+    "randomness": {"bit_generator", "identity_seed", "impression_seed", "uniform_interval", "deformation_noise_distribution", "sensor_noise_distribution"},
+    "identity_template": {"minutiae_count", "minutiae_x_normalized", "minutiae_y_normalized", "minutiae_radius_normalized", "minutiae_phase_shift", "base_orientation_radians", "ridge_frequency_cycles_per_normalized_unit", "core_x_normalized", "core_y_normalized", "curvature", "swirl", "phase_offset_radians", "warp_x", "warp_y", "warp_phase_radians", "ellipticity"},
+    "coordinate_grid": {"normalized_bounds_xy", "complex_step_real_part", "sampling", "axis_order"},
+    "ridge_pattern": {"pi_value", "coordinate_warp_amplitude", "warp_x_angular_frequency_pi", "warp_y_angular_frequency_pi", "minutiae_amplitude", "minutiae_gaussian_denominator_factor", "ridge_phase_frequency_factor", "ridge_tanh_scale", "radial_epsilon", "ridge_contrast_center", "contact_ellipse_outer", "contact_ellipse_width", "background_level", "background_gradient", "ridge_contact_clip"},
+    "impression_variation": {"orientation_delta_degrees", "orientation_delta_radians", "orientation_formula", "frequency_fractional_delta", "frequency_fractional_base", "frequency_formula", "assumption", "rotation_angle_degrees", "translation_yx_pixels", "rotation_reshape", "rotation_axes_yx", "rigid_interpolation_order", "rigid_boundary_mode", "rigid_boundary_cval", "rigid_prefilter"},
+    "deformation": {"coarse_grid_shape_yx", "zoom_factor_divisor_yx", "zoom_interpolation_order", "zoom_mode", "zoom_cval", "zoom_prefilter", "zoom_grid_mode", "zoom_crop_origin_yx", "smoothing_sigma_pixels", "smoothing_order", "smoothing_mode", "smoothing_cval", "smoothing_truncate", "smoothing_radius", "displacement_standard_deviation_pixels", "standard_deviation_epsilon", "standard_deviation_ddof", "standard_deviation_axis", "standard_deviation_keepdims", "displacement_grid_index_origin", "map_coordinates_order", "map_coordinates_mode", "map_coordinates_cval", "map_coordinates_prefilter"},
+    "contact": {"ellipse_outer", "ellipse_width", "scale_x", "scale_y", "center_x_y_normalized", "background_intensity", "mask_clip", "mask_complement_max"},
+    "illumination": {"contrast", "contrast_center", "brightness", "gamma", "pre_blur_clip"},
+    "blur": {"sigma_pixels", "gaussian_filter_order", "mode", "cval", "truncate", "radius"},
+    "noise": {"deformation_mean", "deformation_standard_deviation", "sensor_mean", "sensor_standard_deviation"},
+    "normalization": {"scope", "formula", "output_min", "output_max", "working_dtype", "constant_impression", "final_clipping"},
+    "quantization": {"method", "rounding", "output_dtype", "cast"},
+}
+
+
+def _generator_configuration_valid(config: dict[str, object]) -> tuple[bool, dict[str, bool]]:
+    sections = config.get("parameter_documentation", {}).get("sections", {})
+    section_checks = {
+        key: (set(config.get(key, {})) == required
+              and isinstance(sections.get(key), str) and bool(sections.get(key)))
+        for key, required in REQUIRED_GENERATOR_FIELDS.items()
+    }
+    complete = (config.get("configuration_schema_version") == 1
+                and bool(config.get("generator_version"))
+                and set(sections) == set(REQUIRED_GENERATOR_FIELDS)
+                and all(section_checks.values()))
+    return complete, section_checks
 
 
 def _load(path: Path) -> dict[str, np.ndarray]:
@@ -137,12 +168,16 @@ def inspect_phase1(data_dir: Path) -> dict[str, object]:
         )
         fingerprint_config = config.get("fingerprint_generation", {})
         normalization = fingerprint_config.get("normalization", {})
+        quantization = fingerprint_config.get("quantization", {})
         clarification = config.get("methodology_clarification", {})
-        perturb = fingerprint_config.get("impression_perturbations", {})
+        perturb = fingerprint_config.get("impression_variation", {})
         normalization_ok = (
             normalization.get("scope") == "each completed impression independently"
-            and normalization.get("formula") == "(pixel - impression_min) / (impression_max - impression_min) * 255"
-            and normalization.get("quantization") == "numpy.rint: nearest integer, ties to even, then uint8"
+            and normalization.get("output_min") == 0
+            and normalization.get("output_max") == 255
+            and quantization.get("method") == "numpy.rint"
+            and quantization.get("rounding") == "nearest, ties to even"
+            and quantization.get("output_dtype") == "uint8"
             and normalization.get("constant_impression") == "all-zero uint8 image"
             and normalization.get("final_clipping", "").startswith("none;")
         )
@@ -156,6 +191,26 @@ def inspect_phase1(data_dir: Path) -> dict[str, object]:
         _check(checks, "Persisted acquisition, conversion, and seed provenance",
                bool(lfw_config_ok and seeds_ok and normalization_ok and clarification_ok),
                "Verified LFW acquisition arguments, seeds, per-impression conversion/quantization, clarification reference, and approved perturbation bounds.")
+        generation_complete, section_checks = _generator_configuration_valid(fingerprint_config)
+        provenance = config.get("generator_provenance", {})
+        current_source_hashes = {
+            "do_fmbs_core.py": sha256(Path(__file__).with_name("do_fmbs_core.py")),
+            "phase1_reimplementation.py": sha256(Path(__file__).with_name("phase1_reimplementation.py")),
+        }
+        recorded_source_hashes = provenance.get("source_sha256", {})
+        source_hashes_ok = all(recorded_source_hashes.get(name) == digest
+                               for name, digest in current_source_hashes.items())
+        package_versions_ok = all(
+            provenance.get("dependency_versions", {}).get(name) == importlib.metadata.version(package)
+            for name, package in (("numpy", "numpy"), ("scipy", "scipy"), ("scikit-learn", "scikit-learn"))
+        )
+        config_roundtrip_ok = json.loads(json.dumps(fingerprint_config, sort_keys=True)) == fingerprint_config
+        _check(checks, "Complete generation configuration and source provenance",
+               bool(generation_complete and source_hashes_ok and package_versions_ok
+                    and config_roundtrip_ok
+                    and provenance.get("generator_version") == fingerprint_config.get("generator_version")
+                    and provenance.get("source_revision")),
+               f"all required parameter sections complete={generation_complete}; source hashes match={source_hashes_ok}; dependency versions match={package_versions_ok}; JSON round-trip exact={config_roundtrip_ok}; sections={section_checks}")
         hash_checks = []
         manifest_artifacts = [item for item in manifest.get("artifacts", [])
                               if item.get("path") != "phase1_verification_report.json"]
@@ -201,7 +256,9 @@ def inspect_phase1(data_dir: Path) -> dict[str, object]:
                 images = np.empty((800, 96, 96), dtype=finger["images_train"].dtype)
                 images[finger["train_indices"]] = finger["images_train"]
                 images[finger["test_indices"]] = finger["images_test"]
-                regenerated, regenerated_labels, _impressions, _templates = generate_fingerprint_dataset()
+                regenerated, regenerated_labels, _impressions, _templates = generate_fingerprint_dataset(
+                    config=manifest.get("configuration", {}).get("fingerprint_generation", {})
+                )
                 _check(checks, "Fingerprint generation reproducibility", np.array_equal(images, regenerated),
                        "All 800 persisted raw impressions match a fresh deterministic per-impression min-max regeneration.")
                 pixel_ok = (images.dtype == np.uint8 and np.all(images.min(axis=(1, 2)) == 0)
@@ -213,9 +270,10 @@ def inspect_phase1(data_dir: Path) -> dict[str, object]:
                 # the generator's rendering helper.
                 templates = json.loads((data_dir / "fingerprint_identity_templates.json").read_text(encoding="utf-8"))
                 identity_cfg = fingerprint_config.get("identity_template", {})
-                identity_seed_cfg = fingerprint_config.get("identity_seed", {})
-                impression_seed_cfg = fingerprint_config.get("impression_seed", {})
-                perturb_cfg = fingerprint_config.get("impression_perturbations", {})
+                randomness_cfg = fingerprint_config.get("randomness", {})
+                identity_seed_cfg = randomness_cfg.get("identity_seed", {})
+                impression_seed_cfg = randomness_cfg.get("impression_seed", {})
+                perturb_cfg = fingerprint_config.get("impression_variation", {})
                 template_ok = len(templates) == 100
                 for identity, template in enumerate(templates):
                     expected_seed = (identity_seed_cfg.get("base", -1)
@@ -223,14 +281,14 @@ def inspect_phase1(data_dir: Path) -> dict[str, object]:
                     template_ok &= (template.get("finger_id") == identity
                                     and template.get("identity_seed") == expected_seed
                                     and identity_cfg.get("base_orientation_radians", [0, 0])[0] <= template.get("base_orientation", float("inf")) <= identity_cfg.get("base_orientation_radians", [0, 0])[1]
-                                    and identity_cfg.get("ridge_frequency", [0, 0])[0] <= template.get("ridge_frequency", float("inf")) <= identity_cfg.get("ridge_frequency", [0, 0])[1])
+                                    and identity_cfg.get("ridge_frequency_cycles_per_normalized_unit", [0, 0])[0] <= template.get("ridge_frequency", float("inf")) <= identity_cfg.get("ridge_frequency_cycles_per_normalized_unit", [0, 0])[1])
                 draw_ok = True
                 for identity in range(100):
                     for impression in range(8):
                         seed = (impression_seed_cfg.get("base", -1)
                                 + impression_seed_cfg.get("identity_stride", -1) * identity
                                 + impression_seed_cfg.get("impression_stride", -1) * impression)
-                        rng = np.random.Generator(np.random.PCG64(seed))
+                        rng = np.random.Generator(getattr(np.random, randomness_cfg["bit_generator"])(seed))
                         orientation_delta = rng.uniform(*perturb_cfg["orientation_delta_radians"])
                         frequency_delta = rng.uniform(*perturb_cfg["frequency_fractional_delta"])
                         draw_ok &= (abs(orientation_delta) <= np.deg2rad(1.5)

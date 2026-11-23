@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import platform
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,8 +17,6 @@ from sklearn.preprocessing import StandardScaler
 
 from do_fmbs_core import (
     FINGERPRINT_GENERATION_CONFIG,
-    FINGERPRINT_IDENTITY_SEED,
-    FINGERPRINT_IMPRESSION_SEED,
     generate_fingerprint_dataset,
     sha256,
 )
@@ -27,8 +27,6 @@ SOURCE_DOCUMENT_SHA256 = "E3D90110AC8D4B81C7D70246FA02D3C510352DC064AF6C44792DE3
 SPLIT_SEED = 42
 CLIENT_SEED = 42
 FACE_VERIFICATION_SEED = 20260809
-FINGERPRINT_IDENTITY_SEED_BASE = FINGERPRINT_IDENTITY_SEED
-FINGERPRINT_IMPRESSION_SEED_BASE = FINGERPRINT_IMPRESSION_SEED
 LFW_ACQUISITION = {
     "min_faces_per_person": 20,
     "resize": 0.4,
@@ -167,12 +165,66 @@ def _artifact_inventory(root: Path) -> list[dict[str, object]]:
     return rows
 
 
+def _generator_provenance() -> dict[str, object]:
+    source_paths = (Path(__file__).with_name("do_fmbs_core.py"), Path(__file__))
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return {
+        "generator_version": FINGERPRINT_GENERATION_CONFIG["generator_version"],
+        "source_revision": revision,
+        "source_revision_note": "Git HEAD at replay creation; exact working source files are independently identified by SHA-256 below.",
+        "source_sha256": {path.name: sha256(path) for path in source_paths},
+        "python_version": sys.version,
+        "dependency_versions": {
+            "numpy": np.__version__,
+            "scipy": importlib.metadata.version("scipy"),
+            "scikit-learn": importlib.metadata.version("scikit-learn"),
+        },
+    }
+
+
 def build_phase1(output: Path) -> dict[str, object]:
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Refusing to overwrite non-empty Phase 1 output: {output}")
     output.mkdir(parents=True, exist_ok=True)
     (output / "clients").mkdir()
     (output / "verification").mkdir()
+
+    replay_id = output.name
+    randomness = FINGERPRINT_GENERATION_CONFIG["randomness"]
+    seed_config = {
+        "lfw_loader": {"seed": None, "purpose": "Dataset acquisition/decoding; fetch_lfw_people has no random-state parameter."},
+        "fingerprint_identity": {**randomness["identity_seed"], "purpose": "Identity-persistent template characteristics."},
+        "fingerprint_impression": {**randomness["impression_seed"], "purpose": "Deterministic per-impression acquisition variation."},
+        "stratified_train_test_split": {"value": SPLIT_SEED, "purpose": "scikit-learn train_test_split(random_state=42, stratify=labels), test_size=0.2."},
+        "face_verification_partition": {"value": FACE_VERIFICATION_SEED, "purpose": "Stratified calibration/evaluation partition of held-out face probes."},
+        "fingerprint_verification_partition": {"value": FACE_VERIFICATION_SEED, "purpose": "NumPy RandomState permutation to assign held-out impressions to calibration/evaluation."},
+        "persistent_client_identity_partition": {"value": CLIENT_SEED, "purpose": "NumPy RandomState permutation before splitting identities across five clients."},
+        "python_random_module": {"value": None, "purpose": "Not used by Phase 1 data preparation."},
+        "numpy_global_random_state": {"value": None, "purpose": "Not used by Phase 1 data preparation; fingerprint generation uses the explicit per-identity and per-impression generators above."},
+    }
+    config = {
+        "replay_id": replay_id,
+        "source_document": "docs/reference/CHAPTER_FOUR_MODEL_DEVELOPMENT_IMPLEMENTATION_AND_VALIDATION.docx",
+        "source_document_sha256": SOURCE_DOCUMENT_SHA256,
+        "methodology_clarification": {
+            "document": "docs/reference/PHASE1_FINGERPRINT_METHODOLOGY_CLARIFICATIONS.md",
+            "approval_date": "2026-11-23",
+            "authority": "Researcher-approved clarification of details not fully specified in the original Chapter Four DOCX.",
+        },
+        "lfw_acquisition": LFW_ACQUISITION,
+        "fingerprint_generation": json.loads(json.dumps(FINGERPRINT_GENERATION_CONFIG)),
+        "generator_provenance": _generator_provenance(),
+        "seeds": seed_config,
+        "preprocessing_order": ["per-impression min-max conversion to uint8", "flatten each modality", "fit StandardScaler on the complete modality array", "stratified 80:20 train/test split"],
+        "known_preprocessing_limitation": "StandardScaler is fit before splitting and therefore incorporates held-out distribution statistics (full-array scaler leakage), reproduced to match Chapter Four.",
+    }
+    _json(output / "phase1_config.json", config)
+    # Generate from values parsed back out of the exact configuration artifact.
+    config = json.loads((output / "phase1_config.json").read_text(encoding="utf-8"))
+    generator_config = config["fingerprint_generation"]
 
     lfw = fetch_lfw_people(**lfw_loader_kwargs())
     face_images = np.asarray(lfw.images)
@@ -191,7 +243,7 @@ def build_phase1(output: Path) -> dict[str, object]:
     )
     _save_scaler(output / "face_scaler.npz", face_scaler)
 
-    finger_images, finger_labels, impression_ids, templates = generate_fingerprint_dataset()
+    finger_images, finger_labels, impression_ids, templates = generate_fingerprint_dataset(config=generator_config)
     finger_scaled, finger_scaler = scale_complete_array(finger_images)
     finger_train, finger_test = stratified_split(finger_labels)
     np.savez_compressed(
@@ -228,35 +280,6 @@ def build_phase1(output: Path) -> dict[str, object]:
     np.savez_compressed(output / "verification" / "fingerprint_claims.npz", **finger_verification)
     _json(output / "client_partition.json", {"seed": CLIENT_SEED, "strategy": "identity-exclusive class groups using RandomState permutation", "clients": clients})
 
-    replay_id = output.name
-    seed_config = {
-        "lfw_loader": {"seed": None, "purpose": "Dataset acquisition/decoding; fetch_lfw_people has no random-state parameter."},
-        "fingerprint_identity": {**FINGERPRINT_GENERATION_CONFIG["identity_seed"], "purpose": "Identity-persistent template characteristics."},
-        "fingerprint_impression": {**FINGERPRINT_GENERATION_CONFIG["impression_seed"], "purpose": "Deterministic per-impression acquisition variation."},
-        "stratified_train_test_split": {"value": SPLIT_SEED, "purpose": "scikit-learn train_test_split(random_state=42, stratify=labels), test_size=0.2."},
-        "face_verification_partition": {"value": FACE_VERIFICATION_SEED, "purpose": "Stratified calibration/evaluation partition of held-out face probes."},
-        "fingerprint_verification_partition": {"value": FACE_VERIFICATION_SEED, "purpose": "NumPy RandomState permutation to assign held-out impressions to calibration/evaluation."},
-        "persistent_client_identity_partition": {"value": CLIENT_SEED, "purpose": "NumPy RandomState permutation before splitting identities across five clients."},
-        "python_random_module": {"value": None, "purpose": "Not used by Phase 1 data preparation."},
-        "numpy_global_random_state": {"value": None, "purpose": "Not used by Phase 1 data preparation; fingerprint generation uses the explicit per-identity and per-impression generators above."},
-    }
-    config = {
-        "replay_id": replay_id,
-        "source_document": "docs/reference/CHAPTER_FOUR_MODEL_DEVELOPMENT_IMPLEMENTATION_AND_VALIDATION.docx",
-        "source_document_sha256": SOURCE_DOCUMENT_SHA256,
-        "methodology_clarification": {
-            "document": "docs/reference/PHASE1_FINGERPRINT_METHODOLOGY_CLARIFICATIONS.md",
-            "approval_date": "2026-11-23",
-            "authority": "Researcher-approved clarification of details not fully specified in the original Chapter Four DOCX.",
-        },
-        "lfw_acquisition": LFW_ACQUISITION,
-        "fingerprint_generation": FINGERPRINT_GENERATION_CONFIG,
-        "seeds": seed_config,
-        "preprocessing_order": ["per-impression min-max conversion to uint8", "flatten each modality", "fit StandardScaler on the complete modality array", "stratified 80:20 train/test split"],
-        "known_preprocessing_limitation": "StandardScaler is fit before splitting and therefore incorporates held-out distribution statistics (full-array scaler leakage), reproduced to match Chapter Four.",
-    }
-    _json(output / "phase1_config.json", config)
-
     metadata = {
         "replay_id": replay_id, "source_document": config["source_document"],
         "source_document_sha256": SOURCE_DOCUMENT_SHA256,
@@ -273,7 +296,8 @@ def build_phase1(output: Path) -> dict[str, object]:
                  "evaluation_impostor_claims": int(np.count_nonzero(~face_verification["evaluation_claim_is_genuine"]))},
         "fingerprint": {"source": "locally generated deterministic identity-persistent synthetic ridge patterns; not a public fingerprint dataset",
                         "samples": int(len(finger_images)), "identities": int(len(np.unique(finger_labels))),
-                        "impressions_per_identity": 8, "image_shape": list(finger_images.shape[1:]),
+                        "impressions_per_identity": generator_config["dataset"]["impressions_per_identity"],
+                        "image_shape": list(finger_images.shape[1:]),
                         "normalization": config["fingerprint_generation"]["normalization"],
                         "identity_to_label": [{"identity_id": int(identity), "label": int(identity)} for identity in np.unique(finger_labels)],
                         "features": int(finger_scaled.shape[1]), "train": int(len(finger_train)), "test": int(len(finger_test)),
@@ -285,7 +309,7 @@ def build_phase1(output: Path) -> dict[str, object]:
         "clients": clients,
     }
     _json(output / "phase1_metadata.json", metadata)
-    manifest = {"schema_version": 3, "phase": 1, "status": "ARTIFACTS_WRITTEN_REQUIRES_INDEPENDENT_VERIFICATION",
+    manifest = {"schema_version": 4, "phase": 1, "status": "ARTIFACTS_WRITTEN_REQUIRES_INDEPENDENT_VERIFICATION",
                 "replay_id": replay_id, "metadata": metadata, "configuration": config,
                 "artifacts": _artifact_inventory(output)}
     _json(output / "phase1_manifest.json", manifest)

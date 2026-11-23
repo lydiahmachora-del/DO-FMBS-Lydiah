@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,7 @@ from phase1_reimplementation import (
     identity_client_groups,
     stratified_split,
 )
+from phase1_reimplementation_evidence import _generator_configuration_valid
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,9 +40,18 @@ class ChapterFourSplitTests(unittest.TestCase):
         self.assertEqual((int(result.min()), int(result.max())), (0, 255))
 
     def test_minmax_quantization_uses_numpy_round_to_even(self) -> None:
-        source = np.asarray([0.0, 0.5, 1.5, 2.5, 4.0])
-        expected = np.asarray([0, 32, 96, 159, 255], dtype=np.uint8)
-        np.testing.assert_array_equal(minmax_to_uint8(source), expected)
+        # The range is exactly [0,255], so the input half-integers remain
+        # half-integers after normalization. This separates ties-to-even from
+        # truncation and half-up rounding.
+        source = np.asarray([0.0, 2.5, 3.5, 4.5, 255.0])
+        expected = np.asarray([0, 2, 4, 4, 255], dtype=np.uint8)
+        first = minmax_to_uint8(source)
+        np.testing.assert_array_equal(first, expected)
+        np.testing.assert_array_equal(minmax_to_uint8(source.copy()), expected)
+        self.assertEqual(first.dtype, np.uint8)
+        self.assertEqual((int(first[0]), int(first[-1])), (0, 255))
+        self.assertNotEqual(first.tolist(), np.trunc(source).astype(np.uint8).tolist())
+        self.assertNotEqual(first.tolist(), np.floor(source + 0.5).astype(np.uint8).tolist())
 
     def test_constant_impression_returns_zero_uint8_image(self) -> None:
         source = np.full((3, 5), 4.25, dtype=np.float64)
@@ -53,10 +65,11 @@ class ChapterFourSplitTests(unittest.TestCase):
         second = create_fingerprint_identity_template(7)
         self.assertEqual(first, second)
         self.assertEqual(first["identity_seed"], identity_seed(7))
-        bounds = FINGERPRINT_GENERATION_CONFIG["impression_perturbations"]
+        bounds = FINGERPRINT_GENERATION_CONFIG["impression_variation"]
         orientations, frequencies, rendered = [], [], []
         for impression in range(8):
-            rng = np.random.Generator(np.random.PCG64(impression_seed(7, impression)))
+            bitgen = getattr(np.random, FINGERPRINT_GENERATION_CONFIG["randomness"]["bit_generator"])
+            rng = np.random.Generator(bitgen(impression_seed(7, impression)))
             orientation_delta = float(rng.uniform(*bounds["orientation_delta_radians"]))
             frequency_delta = float(rng.uniform(*bounds["frequency_fractional_delta"]))
             orientations.append(orientation_delta)
@@ -69,6 +82,31 @@ class ChapterFourSplitTests(unittest.TestCase):
         self.assertEqual(len({image.tobytes() for image in rendered}), 8)
         self.assertEqual(first["base_orientation"], second["base_orientation"])
         self.assertEqual(first["ridge_frequency"], second["ridge_frequency"])
+
+    def test_generation_configuration_is_complete_persistable_and_consumed(self) -> None:
+        config = copy.deepcopy(FINGERPRINT_GENERATION_CONFIG)
+        complete, section_checks = _generator_configuration_valid(config)
+        self.assertTrue(complete, section_checks)
+        self.assertEqual(config["configuration_schema_version"], 1)
+
+        incomplete = copy.deepcopy(config)
+        incomplete["deformation"].pop("map_coordinates_order")
+        self.assertFalse(_generator_configuration_valid(incomplete)[0])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "fingerprint_config.json"
+            path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+            reloaded = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(config, reloaded)
+        first = generate_fingerprint_dataset(identities=2, impressions=2, height=24, width=24, config=reloaded)
+        second = generate_fingerprint_dataset(identities=2, impressions=2, height=24, width=24, config=reloaded)
+        np.testing.assert_array_equal(first[0], second[0])
+        self.assertEqual(first[3], second[3])
+
+        changed = copy.deepcopy(reloaded)
+        changed["contact"]["background_intensity"] = 0.0
+        altered = generate_fingerprint_dataset(identities=2, impressions=2, height=24, width=24, config=changed)
+        self.assertFalse(np.array_equal(first[0], altered[0]))
 
     def test_small_fingerprint_generation_is_deterministic(self) -> None:
         first = generate_fingerprint_dataset(identities=2, impressions=2, height=24, width=24)
@@ -126,6 +164,7 @@ class ChapterFourSplitTests(unittest.TestCase):
         self.assertIn("Start final-candidate Phase 1 replay", source)
         self.assertIn("Phase 1 · Chapter Four (Authoritative)", source)
         self.assertIn("LFW identity", source)
+        self.assertIn('config.get("generator_provenance", {})', source)
 
     def test_artifact_hash_changes_after_content_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
