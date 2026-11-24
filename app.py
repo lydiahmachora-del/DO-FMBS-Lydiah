@@ -16,6 +16,11 @@ import streamlit as st
 
 from phase1_evidence import inspect_phase1_artifacts
 from phase1_reimplementation_evidence import inspect_phase1 as inspect_rebuilt_phase1
+from phase3_dashboard import render_phase3_authoritative
+from phase4_dashboard import render_phase4_authoritative
+from phase5_dashboard import render_phase5_authoritative
+from phase6_dashboard import render_phase6_authoritative
+from research_consolidation_dashboard import render_research_consolidation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -69,11 +74,20 @@ PHASES = [
         "prerequisite": "Phase 5 completed successfully.",
     },
 ]
-PAGE_OPTIONS = ["Overview", *[phase["page"] for phase in PHASES], "Evidence & provenance"]
+RESEARCH_COMPARISON_PAGE = "Research simulation - All phases"
+PAGE_OPTIONS = ["Overview", RESEARCH_COMPARISON_PAGE, *[phase["page"] for phase in PHASES], "Evidence & provenance"]
 PHASE1_REBUILD_PAGE = "Phase 1 · Chapter Four (Authoritative)"
 PAGE_OPTIONS.append(PHASE1_REBUILD_PAGE)
 PHASE2_AUTHORITATIVE_PAGE = "Phase 2 · Federated (Chapter Four)"
 PAGE_OPTIONS.append(PHASE2_AUTHORITATIVE_PAGE)
+PHASE3_AUTHORITATIVE_PAGE = "Phase 3 · Attacks (Authoritative)"
+PAGE_OPTIONS.append(PHASE3_AUTHORITATIVE_PAGE)
+PHASE4_AUTHORITATIVE_PAGE = "Phase 4 · Defenses (Authoritative)"
+PAGE_OPTIONS.append(PHASE4_AUTHORITATIVE_PAGE)
+PHASE5_AUTHORITATIVE_PAGE = "Phase 5 · Validation & Testing (Authoritative)"
+PAGE_OPTIONS.append(PHASE5_AUTHORITATIVE_PAGE)
+PHASE6_AUTHORITATIVE_PAGE = "Phase 6 · Dynamic Optimization (Authoritative)"
+PAGE_OPTIONS.append(PHASE6_AUTHORITATIVE_PAGE)
 
 st.set_page_config(page_title="DO-FMBS | Simulation workspace", page_icon="🧬", layout="wide")
 st.markdown("""
@@ -1074,10 +1088,20 @@ if selected_page == "Overview":
     render_overview(manifest, records, run_dir)
 elif selected_page == "Evidence & provenance":
     render_evidence(manifest, records, manifest_path)
+elif selected_page == RESEARCH_COMPARISON_PAGE:
+    render_research_consolidation(RUN_ROOT, ROOT / "docs" / "FINAL_DO_FMBS_RESEARCH_SIMULATION_AND_DEMONSTRATION_REPORT.md")
 elif selected_page == PHASE1_REBUILD_PAGE:
     render_phase1_rebuild()
 elif selected_page == PHASE2_AUTHORITATIVE_PAGE:
     render_phase2_authoritative()
+elif selected_page == PHASE3_AUTHORITATIVE_PAGE:
+    render_phase3_authoritative(RUN_ROOT)
+elif selected_page == PHASE4_AUTHORITATIVE_PAGE:
+    render_phase4_authoritative(RUN_ROOT)
+elif selected_page == PHASE5_AUTHORITATIVE_PAGE:
+    render_phase5_authoritative(RUN_ROOT)
+elif selected_page == PHASE6_AUTHORITATIVE_PAGE:
+    render_phase6_authoritative(RUN_ROOT)
 else:
     phase = next(item for item in PHASES if item["page"] == selected_page)
     render_phase_page(phase, manifest, run_dir, records, done)

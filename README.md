@@ -19,15 +19,22 @@ DO-FMBS is an experimental, six-phase federated biometric pipeline with two inde
 
 The corrected fingerprint generator creates one stable ridge template per synthetic identity and derives impressions through bounded rotation/translation, elastic deformation, pressure variation, blur, sensor noise and partial contact. Phase 1 refuses to continue unless the same-identity/different-identity quality gate passes.
 
-## Authoritative replay
+## Accepted phase evidence
 
-The accepted replay is `final_scientific_replay_20260907`. Its only authoritative numerical index is:
+The current accepted research evidence is held in six independently verified, phase-specific run folders under `runtime_recording/`:
 
-`do_fmbs_data/final_evidence_manifest.json`
+| Phase | Accepted run |
+|---|---|
+| 1 — Data preparation | `phase1_final_candidate_20261123_182623` |
+| 2 — Federated baseline | `phase2_authoritative_20261123_203617_remediation` |
+| 3 — Attacks/security | `phase3_authoritative_20261123_220738` |
+| 4 — Defenses | `phase4_authoritative_20261123_224549` |
+| 5 — Validation/testing | `phase5_authoritative_20261124_072946` |
+| 6 — Dynamic optimization | `phase6_authoritative_20261124_080204` |
 
-That manifest records the replay identifier, parameters, seeds, environment, phase runtimes, independent audit result, final metrics, scope statements and SHA-256 hashes for 68 evidence artifacts. Chapter Four and the Streamlit application validate and read this manifest; they do not read legacy root-level result files.
+Each run has a phase manifest, verifier report, configuration and persisted metrics. The all-phase dashboard checks current hashes for every manifest-listed artifact before marking the values as accepted. Earlier full-pipeline runs and partial/superseded runs remain preserved but are not the source of the current phase summaries. The older `final_scientific_replay_20260907` is historical evidence, not the current accepted six-phase set.
 
-Headline final-test results are:
+Historical full-replay results from `final_scientific_replay_20260907` (not the current phase-specific evidence above) were:
 
 | Task | Face | Fingerprint |
 |---|---:|---:|
@@ -60,13 +67,14 @@ The replay also records nonzero fingerprint-head gradient norms so accidental re
 
 ## Reproduce and verify
 
-Activate the repository virtual environment first. On PowerShell:
+Activate the repository virtual environment first. On PowerShell, create a unique destination so the runner cannot reuse a prior run:
 
 ```powershell
 .\venv\Scripts\Activate.ps1
-python scripts\run_isolated_instrumented_pipeline.py
-python scripts\verify_replay_evidence.py --run-dir runtime_recording\final_scientific_replay_20260907
-python scripts\build_final_evidence_manifest.py --run-dir runtime_recording\final_scientific_replay_20260907
+$runDir = "runtime_recording\fresh_replay_$(Get-Date -Format yyyyMMdd_HHmmss)"
+python scripts\run_isolated_instrumented_pipeline.py --run-dir $runDir
+python scripts\verify_replay_evidence.py --run-dir $runDir
+python scripts\build_final_evidence_manifest.py --run-dir $runDir
 python -m unittest discover -s tests -v
 ```
 
@@ -74,13 +82,17 @@ The isolated runner copies the phase code into a replay directory and writes pha
 
 ## Dashboard
 
-Start the manifest-backed dashboard with:
+Start the research simulation and evidence dashboard with:
 
 ```powershell
 streamlit run app.py
 ```
 
-The dashboard now provides an Overview plus a sidebar for Phases 1–6 and Evidence & Provenance. Each phase explains its purpose, prerequisites, inputs and outputs, shows the recorded configuration and results, and runs in order with streamed console output. A new simulation writes into its own replay folder; after Phase 6 the dashboard runs the independent audit and builds that replay's manifest. The existing accepted manifest remains available as read-only evidence while a new replay is in progress.
+The sidebar includes **Research simulation - All phases**, detailed phase pages, and Evidence & provenance. The consolidated page is read-only: it compares the accepted phase evidence, displays Phase 2's saved accuracy/loss values by round, and provides CSV/JSON/report downloads. The authoritative Phase 3–6 pages likewise present persisted runs without training on page load.
+
+Use **Start a new simulation** to run the sequential Phase 1–6 workflow. It creates an isolated replay folder and streams phase output; the accepted phase-specific runs are left untouched. Once a new replay completes, the app performs its independent audit and records the evidence manifest. Do not choose an existing accepted run folder as a new-run destination.
+
+For the research narrative, accepted run IDs, numerical summaries, graph provenance and limitations, see the final report at `docs/FINAL_DO_FMBS_RESEARCH_SIMULATION_AND_DEMONSTRATION_REPORT.md`.
 
 ## Chapter Four
 
