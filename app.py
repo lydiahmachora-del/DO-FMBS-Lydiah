@@ -115,6 +115,17 @@ st.markdown("""
     div[data-testid="stMetric"] { background:#ffffff; border:1px solid var(--line); padding:.6rem .75rem; border-radius:9px; }
     [data-testid="stPlotlyChart"], [data-testid="stVegaLiteChart"] { border:1px solid var(--line); border-radius:10px; background:#fff; padding:.25rem; }
     .stButton > button[kind="primary"] { background:#176f79; border-color:#176f79; }
+    [data-testid="stDialog"] [role="dialog"] {
+        width:min(92vw, 860px) !important; max-width:calc(100vw - 2rem) !important;
+        max-height:88vh !important; overflow-y:auto !important; box-sizing:border-box;
+        overscroll-behavior:contain; scrollbar-gutter:stable;
+    }
+    [data-testid="stDialog"] [role="dialog"] > div { min-width:0; }
+    [data-testid="stDialog"] [data-testid="stExpander"] { margin:.2rem 0; }
+    [data-testid="stDialog"] [data-testid="stCaptionContainer"] p { margin-bottom:.15rem; }
+    @media (max-height: 760px) {
+        [data-testid="stDialog"] [role="dialog"] { max-height:82vh !important; }
+    }
     h1, h2, h3 { color:#17364e; letter-spacing:-.015em; }
     [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     [data-testid="stSidebar"] [data-testid="stButton"] > button {
@@ -437,34 +448,37 @@ def phase_configuration_dialog(phase_number: int | None) -> None:
                 st.session_state[_form_key(phase, name)] = value if not isinstance(value, list) else ", ".join(map(str, value))
     st.caption("Research defaults are prefilled. Modified values are validated and saved with this isolated execution.")
     if all_phases:
-        st.markdown("### Run All Phases")
-        st.warning("This starts a new isolated pipeline. Every downstream phase consumes artifacts from this same run.")
+        st.markdown("### Configure a new run")
+        st.caption("Each phase keeps its own settings. All outputs stay together in one isolated run.")
     else:
         phase = PHASES[int(phase_number) - 1]
         st.markdown(f"### Phase {phase_number} · {phase['name']}")
-        st.write(phase["purpose"])
-    draft: dict[str, dict] = {}
+        st.caption(phase["purpose"])
     for phase in selected_phases:
         with st.expander(f"Phase {phase} · {PHASES[phase - 1]['name']}", expanded=not all_phases):
             values = {}
-            for name, spec in PHASE_SCHEMAS[phase].items():
-                key = _form_key(phase, name)
-                default = phase_defaults(phase)[name]
-                if key not in st.session_state:
-                    st.session_state[key] = default if not isinstance(default, list) else ", ".join(map(str, default))
-                st.caption(f"{spec['description']} Range: {spec['min']}–{spec['max']} {spec['unit']}. Research default: {default}.")
-                if spec["type"] == "int":
-                    st.number_input(spec["label"], min_value=int(spec["min"]), max_value=int(spec["max"]),
-                                    step=1, key=key)
-                elif spec["type"] == "float":
-                    step = 0.0001 if spec["min"] < 0.001 else (0.001 if spec["min"] < 0.1 else 0.01)
-                    st.number_input(spec["label"], min_value=float(spec["min"]), max_value=float(spec["max"]),
-                                    step=step, format="%.6f", key=key)
-                else:
-                    st.text_input(f"{spec['label']} ({spec['unit']})", key=key,
-                                  help="Enter comma-separated numeric values in ascending order.")
-                values[name] = st.session_state[key]
-            draft[f"phase{phase}"] = values
+            defaults = phase_defaults(phase)
+            fields = list(PHASE_SCHEMAS[phase].items())
+            for row_start in range(0, len(fields), 2):
+                field_columns = st.columns(2, gap="medium")
+                for column, (name, spec) in zip(field_columns, fields[row_start:row_start + 2]):
+                    key = _form_key(phase, name)
+                    default = defaults[name]
+                    if key not in st.session_state:
+                        st.session_state[key] = default if not isinstance(default, list) else ", ".join(map(str, default))
+                    help_text = (f"{spec['description']} Valid range: {spec['min']} to {spec['max']} "
+                                 f"{spec['unit']}. Research default: {default}.")
+                    if spec["type"] == "int":
+                        column.number_input(spec["label"], min_value=int(spec["min"]), max_value=int(spec["max"]),
+                                            step=1, key=key, help=help_text)
+                    elif spec["type"] == "float":
+                        step = 0.0001 if spec["min"] < 0.001 else (0.001 if spec["min"] < 0.1 else 0.01)
+                        column.number_input(spec["label"], min_value=float(spec["min"]), max_value=float(spec["max"]),
+                                            step=step, format="%.6f", key=key, help=help_text)
+                    else:
+                        column.text_input(f"{spec['label']} ({spec['unit']})", key=key,
+                                          help=help_text + " Enter comma-separated numeric values in ascending order.")
+                    values[name] = st.session_state[key]
             try:
                 normalized = {name: ([float(v.strip()) for v in value.split(",") if v.strip()]
                                      if PHASE_SCHEMAS[phase][name]["type"] == "float_list" else value)
@@ -475,7 +489,6 @@ def phase_configuration_dialog(phase_number: int | None) -> None:
                 with st.expander("Configuration preview", expanded=False):
                     st.json({"phase": phase, "values": normalized,
                              "changed_parameters": changed}, expanded=True)
-                draft[f"phase{phase}"] = normalized
             except (TypeError, ValueError) as error:
                 st.error(f"Configuration validation: {error}")
 
@@ -1156,9 +1169,12 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     if run_dir is None:
         if number == 1:
             st.info("No fresh interactive run is active. Start a new run from Simulation, then trigger Phase 1 to begin.")
+            if st.button("Start a new run for Phase 1", type="primary", key="phase_1_start_fresh_run"):
+                start_new_replay()
+                st.rerun()
         else:
             required = ", ".join(f"Phase {index}" for index in range(1, number))
-            st.info(f"No fresh interactive run is active. Start a new run from Simulation, then complete {required} in order before Phase {number}.")
+            st.info(f"No fresh interactive run is active. Start one from Simulation and complete {required} in order before Phase {number}.")
     elif phase_is_next:
         if done:
             st.success(f"Phase {number} completed in run `{run_dir.name}`.")
@@ -1580,18 +1596,16 @@ elif selected_page == "Evidence & provenance":
     render_evidence(manifest, records, manifest_path)
 elif selected_page == RESEARCH_COMPARISON_PAGE:
     render_research_consolidation(RUN_ROOT, ROOT / "docs" / "FINAL_DO_FMBS_RESEARCH_SIMULATION_AND_DEMONSTRATION_REPORT.md")
-elif selected_page == PHASE1_REBUILD_PAGE:
-    render_phase1_rebuild()
-elif selected_page == PHASE2_AUTHORITATIVE_PAGE:
-    render_phase2_authoritative()
-elif selected_page == PHASE3_AUTHORITATIVE_PAGE:
-    render_phase3_authoritative(RUN_ROOT)
-elif selected_page == PHASE4_AUTHORITATIVE_PAGE:
-    render_phase4_authoritative(RUN_ROOT)
-elif selected_page == PHASE5_AUTHORITATIVE_PAGE:
-    render_phase5_authoritative(RUN_ROOT)
-elif selected_page == PHASE6_AUTHORITATIVE_PAGE:
-    render_phase6_authoritative(RUN_ROOT)
+elif selected_page in {
+    PHASE1_REBUILD_PAGE, PHASE2_AUTHORITATIVE_PAGE, PHASE3_AUTHORITATIVE_PAGE,
+    PHASE4_AUTHORITATIVE_PAGE, PHASE5_AUTHORITATIVE_PAGE, PHASE6_AUTHORITATIVE_PAGE,
+}:
+    phase_number = {
+        PHASE1_REBUILD_PAGE: 1, PHASE2_AUTHORITATIVE_PAGE: 2,
+        PHASE3_AUTHORITATIVE_PAGE: 3, PHASE4_AUTHORITATIVE_PAGE: 4,
+        PHASE5_AUTHORITATIVE_PAGE: 5, PHASE6_AUTHORITATIVE_PAGE: 6,
+    }[selected_page]
+    render_phase_page(PHASES[phase_number - 1], manifest, run_dir, records, done)
 else:
     if selected_page in {phase["page"] for phase in PHASES}:
         phase = next(item for item in PHASES if item["page"] == selected_page)
