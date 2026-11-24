@@ -313,7 +313,7 @@ def phase_artifact_path(run_dir: Path | None, manifest: dict | None, phase: int,
 
 def run_streamed(command: list[str], title: str, phase_progress=None) -> bool:
     lines: list[str] = []
-    status = st.status(f"Running · {title}", expanded=False)
+    status = st.status(f"Running · {title}", expanded=True)
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
     environment["MPLBACKEND"] = "Agg"
@@ -323,7 +323,8 @@ def run_streamed(command: list[str], title: str, phase_progress=None) -> bool:
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
         assert process.stdout is not None
-        with st.expander("Technical execution log", expanded=False):
+        with st.expander("Technical execution log", expanded=True):
+            st.caption("Live output from the running phase. New lines appear automatically as the process reports progress.")
             output = st.empty()
             for line in process.stdout:
                 lines.append(line.rstrip())
@@ -893,7 +894,7 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
         st.caption(f"Last run: {record.get('start_timestamp', 'time unavailable')} · {float(record.get('elapsed_seconds', 0)):.1f} sec · exit {record.get('exit_code')}")
         log = run_dir / record.get("log_path", f"phase{number}_console.log") if run_dir else None
         if log and log.exists():
-            with st.expander("Technical execution log", expanded=False):
+            with st.expander("Technical execution log", expanded=True):
                 try:
                     st.code("\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]), language="text")
                 except OSError:
