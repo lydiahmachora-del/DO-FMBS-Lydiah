@@ -20,12 +20,12 @@ from phase3_dashboard import render_phase3_authoritative
 from phase4_dashboard import render_phase4_authoritative
 from phase5_dashboard import render_phase5_authoritative
 from phase6_dashboard import render_phase6_authoritative
-from research_consolidation_dashboard import render_research_consolidation
+from research_consolidation_dashboard import ACCEPTED_RUNS, render_research_consolidation
 
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "do_fmbs_data" / "final_evidence_manifest.json"
-RUNNER = ROOT / "scripts" / "run_isolated_instrumented_pipeline.py"
+RUNNER = ROOT / "run_interactive_pipeline.py"
 AUDITOR = ROOT / "scripts" / "verify_replay_evidence.py"
 MANIFEST_BUILDER = ROOT / "scripts" / "build_final_evidence_manifest.py"
 RUN_ROOT = ROOT / "runtime_recording"
@@ -76,6 +76,7 @@ PHASES = [
 ]
 RESEARCH_COMPARISON_PAGE = "Cross-Phase Analysis"
 RESEARCH_SCOPE_PAGE = "Research Scope & Limitations"
+SIMULATION_PAGE = "Simulation"
 PHASE1_REBUILD_PAGE = "Phase 1 · Data preparation"
 PHASE2_AUTHORITATIVE_PAGE = "Phase 2 · Federated baseline"
 PHASE3_AUTHORITATIVE_PAGE = "Phase 3 · Attack experiments"
@@ -83,7 +84,7 @@ PHASE4_AUTHORITATIVE_PAGE = "Phase 4 · Defense mechanisms"
 PHASE5_AUTHORITATIVE_PAGE = "Phase 5 · Model validation"
 PHASE6_AUTHORITATIVE_PAGE = "Phase 6 · Dynamic optimization"
 PAGE_OPTIONS = [
-    "Overview", RESEARCH_COMPARISON_PAGE, PHASE1_REBUILD_PAGE,
+    "Overview", SIMULATION_PAGE, RESEARCH_COMPARISON_PAGE, PHASE1_REBUILD_PAGE,
     PHASE2_AUTHORITATIVE_PAGE, PHASE3_AUTHORITATIVE_PAGE,
     PHASE4_AUTHORITATIVE_PAGE, PHASE5_AUTHORITATIVE_PAGE,
     PHASE6_AUTHORITATIVE_PAGE, RESEARCH_SCOPE_PAGE,
@@ -93,33 +94,38 @@ DIAGNOSTIC_OPTIONS = ["Choose a workflow view", *[phase["page"] for phase in PHA
 st.set_page_config(page_title="DO-FMBS | Simulation workspace", page_icon="🧬", layout="wide")
 st.markdown("""
 <style>
-    :root { --navy:#16324a; --blue:#285875; --teal:#167d83; --ink:#1c2d3a; --muted:#657785; --line:#dce5ea; }
-    .block-container { padding-top:1.5rem; padding-bottom:2.8rem; max-width:1480px; }
-    [data-testid="stSidebar"] { background:#17344d; border-right:1px solid #294a63; }
-    [data-testid="stSidebar"] * { color:#eef4f7; }
-    [data-testid="stSidebar"] [data-testid="stRadio"] label { color:#edf4f7; }
-    .hero { padding:1.35rem 1.55rem; border-radius:12px; color:white; background:#173b56; margin-bottom:1rem; }
-    .hero h1 { color:white; margin:0 0 .35rem 0; font-size:1.9rem; }
-    .hero p { color:#d6e2e9; margin:0; }
-    .eyebrow { color:#7dd0ca; text-transform:uppercase; letter-spacing:.1em; font-size:.72rem; font-weight:700; }
-    .phase-card { background:#f7f9fa; border:1px solid var(--line); border-radius:10px; padding:.9rem 1rem; min-height:122px; }
+    :root { --navy:#17364e; --blue:#285875; --teal:#167d83; --ink:#1c2d3a; --muted:#5d6e79; --line:#dce5ea; }
+    .block-container { padding-top:1.35rem; padding-bottom:2.5rem; max-width:1480px; }
+    [data-testid="stSidebar"] { background:#ffffff; border-right:1px solid var(--line); }
+    [data-testid="stSidebar"] * { color:var(--ink); }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label { color:var(--ink); }
+    .hero { padding:1.1rem 1.35rem; border-radius:10px; color:var(--ink); background:#edf4f5; border:1px solid #dce8e9; margin-bottom:.8rem; }
+    .hero h1 { color:var(--navy); margin:0 0 .25rem 0; font-size:1.8rem; }
+    .hero p { color:#4f626e; margin:0; }
+    .eyebrow { color:#176f79; text-transform:uppercase; letter-spacing:.08em; font-size:.72rem; font-weight:700; }
+    .phase-card { background:#ffffff; border:1px solid var(--line); border-radius:9px; padding:.85rem .95rem; min-height:158px; height:158px; box-sizing:border-box; }
     .phase-card h4 { color:var(--navy); margin:.15rem 0 .4rem 0; }
-    .phase-card p { color:#526574; font-size:.88rem; margin:0; line-height:1.45; }
+    .phase-card p { color:#4e606d; font-size:.86rem; margin:0; line-height:1.42; }
     .small-muted { color:var(--muted); font-size:.86rem; }
-    div[data-testid="stMetric"] { background:#f8fafb; border:1px solid var(--line); padding:.65rem .8rem; border-radius:9px; }
+    div[data-testid="stMetric"] { background:#ffffff; border:1px solid var(--line); padding:.6rem .75rem; border-radius:9px; }
     [data-testid="stPlotlyChart"], [data-testid="stVegaLiteChart"] { border:1px solid var(--line); border-radius:10px; background:#fff; padding:.25rem; }
     .stButton > button[kind="primary"] { background:#176f79; border-color:#176f79; }
     h1, h2, h3 { color:#17364e; letter-spacing:-.015em; }
     [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     [data-testid="stSidebar"] [data-testid="stButton"] > button {
-        background:#176f79 !important; color:#ffffff !important;
-        border:1px solid #5aa9a8 !important; font-weight:700 !important;
+        background:#167d83 !important; color:#ffffff !important;
+        border:1px solid #167d83 !important; font-weight:700 !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
-        background:#125d65 !important; border-color:#8bc5c1 !important;
+        background:#126c71 !important; border-color:#126c71 !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] > button:focus-visible {
         outline:3px solid #f4c95d !important; outline-offset:2px !important;
+    }
+    [data-testid="stDataFrame"], [data-testid="stTable"] { background:#ffffff; }
+    @media (max-width: 900px) {
+        .phase-card { min-height:180px; height:auto; }
+        .block-container { padding-left:1rem; padding-right:1rem; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -305,7 +311,7 @@ def phase_artifact_path(run_dir: Path | None, manifest: dict | None, phase: int,
     return None
 
 
-def run_streamed(command: list[str], title: str) -> bool:
+def run_streamed(command: list[str], title: str, phase_progress=None) -> bool:
     lines: list[str] = []
     status = st.status(f"Running · {title}", expanded=False)
     environment = os.environ.copy()
@@ -322,6 +328,14 @@ def run_streamed(command: list[str], title: str) -> bool:
             for line in process.stdout:
                 lines.append(line.rstrip())
                 output.code("\n".join(lines[-45:]), language="text")
+                if phase_progress and line.startswith("[TIMING] Phase "):
+                    parts = line.split()
+                    if len(parts) > 3 and parts[2].isdigit():
+                        phase_number = int(parts[2])
+                        if " started at " in line:
+                            phase_progress(phase_number, "running")
+                        elif " ended with " in line:
+                            phase_progress(phase_number, "completed" if "EXECUTION-COMPLETED" in line else "failed")
         return_code = process.wait()
     except OSError as error:
         status.update(label=f"Error · {title}", state="error", expanded=False)
@@ -349,8 +363,8 @@ def start_new_replay() -> Path:
         suffix += 1
     run_dir.mkdir(parents=True, exist_ok=False)
     st.session_state["active_run_dir"] = str(run_dir)
-    st.session_state["selected_page"] = "Overview"
-    st.session_state["diagnostic_page"] = PHASES[0]["page"]
+    st.session_state["selected_page"] = SIMULATION_PAGE
+    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
     return run_dir
 
 
@@ -365,12 +379,117 @@ def execute_phase(phase_number: int, run_dir: Path) -> bool:
     ]
     if not run_streamed(command, f"Phase {phase_number}: {PHASES[phase_number - 1]['name']}"):
         return False
-    if phase_number != 6:
-        st.session_state["selected_page"] = PHASES[phase_number]["page"]
-        st.rerun()
-        return True
+    st.session_state["selected_page"] = SIMULATION_PAGE
+    st.session_state["diagnostic_page"] = PHASES[phase_number - 1]["page"]
+    if phase_number == 6:
+        return finalize_replay(run_dir)
+    st.rerun()
+    return True
 
-    return finalize_replay(run_dir)
+
+def view_phase_results(phase_number: int) -> None:
+    st.session_state["selected_page"] = SIMULATION_PAGE
+    st.session_state["diagnostic_page"] = PHASES[phase_number - 1]["page"]
+
+
+def start_and_run_phase_one() -> None:
+    run_dir = start_new_replay()
+    execute_phase(1, run_dir)
+
+
+def return_to_simulation() -> None:
+    st.session_state["selected_page"] = SIMULATION_PAGE
+    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
+
+
+def run_all_phases() -> None:
+    run_dir = start_new_replay()
+    progress = st.progress(0, text="Preparing a new isolated run")
+    stage = st.empty()
+
+    def show_phase_progress(phase_number: int, state: str) -> None:
+        phase_name = PHASES[phase_number - 1]["name"]
+        completed_before = phase_number - 1
+        pending_after = 6 - phase_number
+        if state == "running":
+            progress.progress(completed_before / 6, text=f"Phase {phase_number} of 6 · {phase_name}")
+            stage.info(f"Running Phase {phase_number}: {phase_name} · {completed_before} complete · {pending_after} pending")
+        elif state == "completed":
+            progress.progress(phase_number / 6, text=f"{phase_number} of 6 phases complete")
+            stage.caption(f"Phase {phase_number} complete · {phase_name}")
+        else:
+            stage.error(f"Phase {phase_number} failed · {phase_name}")
+
+    command = [sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
+               "--start-phase", "1", "--end-phase", "6", "--resume"]
+    if run_streamed(command, "Six-phase simulation", phase_progress=show_phase_progress):
+        progress.progress(1.0, text="Six phases complete · publishing evidence")
+        stage.success("All six phases completed. Finalizing this isolated run.")
+        finalize_replay(run_dir)
+    else:
+        st.rerun()
+
+
+def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: dict | None) -> None:
+    st.title("Simulation")
+    st.caption("Run all six phases in a new isolated run, or continue one phase at a time with its prerequisites enforced.")
+    if run_dir:
+        st.info(f"Current run: `{run_dir.name}`. A new full run creates a different run ID and leaves this run and all accepted results intact.")
+        st.button("Run All Phases · New Run", type="primary", key="run_all_phases", on_click=run_all_phases)
+        if st.button("Start a new run", key="new_interactive_run"):
+            start_new_replay()
+            st.rerun()
+    else:
+        st.info("No interactive run is selected. A run started here receives its own folder, configuration, seeds, and phase logs.")
+        all_col, one_col = st.columns(2)
+        all_col.button("Run All Phases · New Run", type="primary", key="run_all_phases_empty", on_click=run_all_phases)
+        if one_col.button("Start a run for individual phases", key="new_interactive_run_empty"):
+            start_new_replay()
+            st.rerun()
+
+    done = completed_phases(records)
+    failed = {int(row.get("phase", 0)) for row in records if int(row.get("exit_code") or 0) != 0}
+    if run_dir:
+        elapsed = sum(float(row.get("elapsed_seconds", 0)) for row in records)
+        cards = st.columns(3)
+        cards[0].metric("Current run", "In progress" if len(done) < 6 else "Completed")
+        cards[1].metric("Phases complete", f"{len(done)} / 6")
+        cards[2].metric("Recorded phase time", f"{elapsed:.1f} s")
+        st.caption(f"Run ID: `{run_dir.name}`")
+        st.progress(len(done) / 6, text=f"Workflow stages · {len(done)} of 6 complete")
+    elif manifest:
+        st.caption(f"Accepted results are available in Cross-Phase Analysis · `{manifest.get('replay_id', 'saved run')}`")
+
+    st.subheader("Phase controls and results")
+    for offset in range(0, 6, 3):
+        columns = st.columns(3)
+        for column, phase in zip(columns, PHASES[offset:offset + 3]):
+            number = phase["number"]
+            phase_done = number in done
+            prerequisite_met = number == 1 or all(index in done for index in range(1, number))
+            status_text = "Complete" if phase_done else ("Error" if number in failed else ("Ready" if prerequisite_met else "Waiting"))
+            column.markdown(
+                f'<div class="phase-card"><div class="eyebrow">Phase {number} · {status_text}</div>'
+                f'<h4>{phase["name"]}</h4><p>{phase["purpose"]}</p></div>',
+                unsafe_allow_html=True,
+            )
+            if phase_done:
+                column.button("View Results", key=f"view_phase_{number}",
+                              on_click=view_phase_results, args=(number,), use_container_width=True)
+            elif run_dir and prerequisite_met:
+                column.button(f"Run Phase {number}", key=f"run_phase_{number}",
+                              on_click=execute_phase, args=(number, run_dir), type="primary",
+                              use_container_width=True)
+            elif not run_dir and number == 1:
+                column.button("Start run · Phase 1", key="run_phase_1_empty", type="primary",
+                              on_click=start_and_run_phase_one)
+            else:
+                column.button("Waiting for prerequisite", key=f"phase_waiting_{number}", disabled=True,
+                              use_container_width=True)
+                if not prerequisite_met:
+                    column.caption(f"Available after Phase {number - 1} completes.")
+    if len(done) == 6 and manifest:
+        st.success("This interactive run is complete. Use the View Results buttons above to inspect its saved phase outputs; Cross-Phase Analysis presents the accepted research runs.")
 
 
 def finalize_replay(run_dir: Path) -> bool:
@@ -663,26 +782,35 @@ def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | 
         state_text = "Not started"
         replay_id = "No interactive replay selected"
         runtime = 0.0
-    metric_card_row([("Interactive run", state_text), ("Run", replay_id),
-                     ("Phases completed", f"{len(done)} / 6"), ("Elapsed time", f"{runtime:.1f} s")])
+    metric_card_row([("Run status", state_text), ("Phases completed", f"{len(done)} / 6"),
+                     ("Recorded phase time", f"{runtime:.1f} s")])
+    st.caption(f"Interactive run ID: `{replay_id}`")
     if run_dir or manifest:
         st.progress(len(done) / 6, text=f"Interactive workflow · {len(done)} of 6 phases completed")
     else:
-        st.caption("Accepted phase results are available under Cross-Phase Analysis. Use Start Simulation in the sidebar to begin a separate interactive replay.")
+        st.caption("Accepted results are available under Cross-Phase Analysis. Use Simulation to start a new isolated run.")
     st.markdown("### Research workflow")
+    overview_text = {
+        1: "Prepare face and synthetic fingerprint data, preprocessing, and client partitions.",
+        2: "Train and aggregate the two modality-specific identity models across five clients.",
+        3: "Evaluate face-branch evasion, membership inference, and label-flipping scenarios.",
+        4: "Compare gradient-noise, adversarial, and combined defense conditions.",
+        5: "Assess classification, verification, robustness, and statistical comparisons.",
+        6: "Fit the constrained response model and inspect its twelve-round policy schedule.",
+    }
     for offset in range(0, 6, 3):
         cols = st.columns(3)
         for col, phase in zip(cols, PHASES[offset:offset + 3]):
             number = phase["number"]
-            failed = next((row for row in records if int(row.get("phase", 0)) == number and int(row.get("exit_code", 0)) != 0), None)
+            failed = next((row for row in records if int(row.get("phase", 0)) == number and int(row.get("exit_code") or 0) != 0), None)
             status_text = "Error" if failed else ("Completed" if number in done else ("Queued" if number == (len(done) + 1) else "Waiting"))
             col.markdown(
                 f'<div class="phase-card"><div class="eyebrow">Phase {number} · {status_text}</div>'
-                f'<h4>{phase["name"]}</h4><p>{phase["purpose"]}</p></div>',
+                f'<h4>{phase["name"]}</h4><p>{overview_text[number]}</p></div>',
                 unsafe_allow_html=True,
             )
     if run_dir is None and not manifest:
-        st.info("Use Start Simulation in the sidebar to create a new isolated run.")
+        st.info("Open Simulation to start one phase or run the complete six-phase workflow in a new isolated run.")
     elif len(done) == 6 and manifest:
         st.info("This interactive replay is complete. Its execution record is available in Technical diagnostics.")
     elif done:
@@ -691,9 +819,37 @@ def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | 
     else:
         st.info("A new run folder is ready. Open Technical diagnostics → Run Phase 1 to begin the sequential workflow.")
 
+    st.markdown("### Research snapshots")
+    phase2_dir = RUN_ROOT / ACCEPTED_RUNS[2][0]
+    phase6_dir = RUN_ROOT / ACCEPTED_RUNS[6][0]
+    try:
+        round_metrics = pd.read_csv(phase2_dir / "round_metrics.csv")
+        schedule = pd.read_csv(phase6_dir / "dynamic_schedule_detailed.csv")
+        chart_left, chart_right = st.columns(2)
+        accuracy = round_metrics.copy()
+        accuracy[["test_face_output_accuracy", "test_finger_output_accuracy"]] *= 100
+        chart_left.subheader("Federated test accuracy")
+        chart_left.line_chart(accuracy, x="round", y=["test_face_output_accuracy", "test_finger_output_accuracy"],
+                              x_label="Federated round", y_label="Accuracy (%)",
+                              color=["#285875", "#167d83"], height=270)
+        chart_right.subheader("Phase 6 predicted response")
+        chart_right.line_chart(schedule, x="round", y="predicted_Y", x_label="Controller round",
+                              y_label="Predicted response Y", color="#167d83", height=270)
+        st.caption("Both charts are drawn from the saved accepted phase runs; they do not trigger training or optimization.")
+    except (OSError, ValueError, KeyError) as error:
+        st.info("Research snapshots are not available from the saved phase files.")
+        with st.expander("Details"):
+            st.caption(str(error))
+
+    st.button("View Cross-Phase Analysis", key="overview_cross_phase",
+              on_click=lambda: (st.session_state.update({"selected_page": RESEARCH_COMPARISON_PAGE,
+                                                        "diagnostic_page": DIAGNOSTIC_OPTIONS[0]})))
+
 
 def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                       records: list[dict], completed: set[int]) -> None:
+    st.button("Back to Simulation", key=f"back_to_simulation_{phase['number']}",
+              on_click=return_to_simulation)
     number = phase["number"]
     record = next((row for row in records if int(row["phase"]) == number), None)
     done = number in completed
@@ -716,7 +872,7 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
 
     phase_is_next = number == 1 or all(index in completed for index in range(1, number))
     if run_dir is None:
-        st.info("Start a new interactive run from Overview to execute phases in sequence.")
+        st.info("Start a new interactive run from the Simulation page to execute phases in sequence.")
     elif phase_is_next:
         if done:
             st.success(f"Phase {number} completed in run `{run_dir.name}`.")
@@ -1092,7 +1248,7 @@ with st.sidebar:
         st.session_state.pop("selected_page", None)
     if st.session_state.get("diagnostic_page") not in DIAGNOSTIC_OPTIONS:
         st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
-    st.markdown("<div style='padding:.4rem 0 1rem'><div style='font-size:1.2rem;font-weight:800'>DO-FMBS</div><div style='font-size:.82rem;color:#c5d9e2'>Federated biometric research</div></div>", unsafe_allow_html=True)
+    st.markdown("<div style='padding:.4rem 0 1rem'><div style='font-size:1.2rem;font-weight:800;color:#17364e'>DO-FMBS</div><div style='font-size:.82rem;color:#526574'>Federated biometric research</div></div>", unsafe_allow_html=True)
     if run_dir:
         st.caption(f"Interactive run · {run_dir.name}")
         st.progress(len(done) / 6, text=f"Workflow · {len(done)} of 6 phases")
@@ -1103,18 +1259,20 @@ with st.sidebar:
         st.caption("Saved results are available in Cross-Phase Analysis.")
     st.radio("Research navigation", PAGE_OPTIONS, key="selected_page",
              on_change=clear_diagnostic_page, label_visibility="visible")
-    st.button("Start Simulation", type="primary", use_container_width=True,
+    st.button("New Interactive Run", type="primary", use_container_width=True,
               on_click=start_new_replay)
-    with st.expander("Interactive workflow & diagnostics", expanded=False):
+    with st.expander("Technical diagnostics", expanded=False):
         st.selectbox("Run or inspect a phase", DIAGNOSTIC_OPTIONS,
                      key="diagnostic_page", label_visibility="visible")
-        st.caption("Execution records and technical logs are separate from accepted phase results.")
-    st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:.8rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
+        st.caption("Execution records and logs for interactive runs.")
+    st.markdown("<div style='font-size:.76rem;color:#526574;padding-top:.8rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
 
 diagnostic_page = st.session_state.get("diagnostic_page", DIAGNOSTIC_OPTIONS[0])
 selected_page = diagnostic_page if diagnostic_page != DIAGNOSTIC_OPTIONS[0] else st.session_state.get("selected_page", "Overview")
 if selected_page == "Overview":
     render_overview(manifest, records, run_dir)
+elif selected_page == SIMULATION_PAGE:
+    render_simulation_page(records, run_dir, manifest)
 elif selected_page == RESEARCH_SCOPE_PAGE:
     render_research_scope()
 elif selected_page == "Evidence & provenance":

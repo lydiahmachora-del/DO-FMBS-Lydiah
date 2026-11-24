@@ -96,17 +96,39 @@ def render_phase6_authoritative(run_root: Path) -> None:
             st.code(str(error))
         return
     st.subheader("Prescribed twelve-round policy schedule")
-    display = schedule[["round", "epsilon", "AI", "PA", "previous_DM", "previous_GS", "DM", "K", "GS",
-                        "predicted_Y", "defense_cost", "participation_cost", "defense_switch_cost",
-                        "participation_switch_cost", "total_cost", "status", "deployment_decision"]]
+    st.caption("The selected candidate is identified from the persisted 63-row search for each round; target category and decision are the recorded controller outputs.")
+    candidates["candidate_number"] = candidates.groupby("round").cumcount() + 1
+    selected_candidates = candidates.loc[candidates["selected"], ["round", "candidate_number"]]
+    display = schedule.merge(selected_candidates, on="round", how="left", validate="one_to_one")
+    display = display[["round", "candidate_number", "AI", "PA", "DM", "K", "GS",
+                       "predicted_Y", "total_cost", "status", "deployment_decision"]].rename(columns={
+                           "candidate_number": "Selected candidate #", "predicted_Y": "Predicted response Y",
+                           "total_cost": "Total cost", "status": "Target category",
+                           "deployment_decision": "Decision",
+                       })
     st.dataframe(display, width="stretch", hide_index=True)
-    plot_left, plot_right = st.columns(2)
-    plot_left.line_chart(schedule, x="round", y=["AI", "PA"],
-                         x_label="Federated round", y_label="Threat state", height=300)
-    plot_right.line_chart(schedule, x="round", y=["DM", "GS"],
-                          x_label="Federated round", y_label="Control setting", height=300)
+    plot_top = st.columns(2)
+    for column, variable, label, color in zip(
+        plot_top, ("AI", "PA"), ("Adversarial intensity (AI)", "Participation adjustment (PA)"),
+        ("#285875", "#167d83"),
+    ):
+        column.line_chart(schedule, x="round", y=variable, x_label="Round",
+                          y_label=label, color=color, height=250)
+    plot_bottom = st.columns(2)
+    for column, variable, label, color in zip(
+        plot_bottom, ("DM", "GS"), ("Defense multiplier (DM)", "Global scaling (GS)"),
+        ("#b06c42", "#6e62a6"),
+    ):
+        column.line_chart(schedule, x="round", y=variable, x_label="Round",
+                          y_label=label, color=color, height=250)
     st.line_chart(schedule, x="round", y="predicted_Y", x_label="Federated round",
                   y_label="Predicted response Y", color="#167d83", height=280)
+    with st.expander("Full policy schedule, including cost components"):
+        st.dataframe(schedule[["round", "epsilon", "AI", "PA", "previous_DM", "previous_GS",
+                               "candidate_count", "DM", "K", "GS", "predicted_Y", "defense_cost",
+                               "participation_cost", "defense_switch_cost", "participation_switch_cost",
+                               "total_cost", "status", "deployment_decision"]],
+                     width="stretch", hide_index=True)
     round_number = st.selectbox("Inspect all candidates in a round", list(range(1, 13)), key="phase6_candidate_round")
     with st.expander(f"Round {round_number}: all 63 candidate policies", expanded=False):
         st.dataframe(candidates[candidates["round"] == round_number], width="stretch", hide_index=True)
