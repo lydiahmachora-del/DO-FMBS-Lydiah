@@ -244,8 +244,9 @@ def main() -> int:
     face_test, face_test_y = sample_partition(face_test, face_test_y, args.evaluation_sample_count, rng)
     finger_cal, finger_cal_y = sample_partition(finger_cal, finger_cal_y, args.evaluation_sample_count, rng)
     finger_test, finger_test_y = sample_partition(finger_test, finger_test_y, args.evaluation_sample_count, rng)
-    baseline = tf.keras.models.load_model(args.data_dir / "baseline_model.keras")
-    final_model = tf.keras.models.load_model(args.data_dir / "do_fmbs_model.keras")
+    # Validation is inference-only; the saved optimizer slots are not used.
+    baseline = tf.keras.models.load_model(args.data_dir / "baseline_model.keras", compile=False)
+    final_model = tf.keras.models.load_model(args.data_dir / "do_fmbs_model.keras", compile=False)
 
     artifacts = []
     modality_payloads = {}
