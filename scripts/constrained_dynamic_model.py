@@ -305,23 +305,28 @@ def predict(fit: FitResult, ai: float, pa: float, dm: float, gs: float) -> float
 def optimize_controls(fit: FitResult, ai: float, pa: float, previous_dm: float,
                       previous_gs: float, target: float = TARGET_Y,
                       preferred: float = PREFERRED_Y,
-                      cost_weights: dict | None = None) -> dict:
+                      cost_weights: dict | None = None,
+                      candidates_per_round: int = 63) -> dict:
     """Choose lowest-cost controls, preferring Y>=0.70 then requiring Y>=0.60."""
     # Validate the threat state before constructing any numerical decision.
     predict(fit, ai, pa, 0.0, gs_from_clients(MIN_PARTICIPATING_CLIENTS))
     weights = COST_WEIGHTS if cost_weights is None else cost_weights
     candidates = []
-    for dm in np.linspace(0.0, 1.0, 21):
-        for clients in range(MIN_PARTICIPATING_CLIENTS, CLIENTS_TOTAL + 1):
-            gs = gs_from_clients(clients)
-            predicted = predict(fit, ai, pa, float(dm), gs)
-            cost = (
-                weights["defense"] * float(dm) ** 2
-                + weights["participation"] * gs ** 2
-                + weights["defense_switch"] * (float(dm) - previous_dm) ** 2
-                + weights["participation_switch"] * (gs - previous_gs) ** 2
-            )
-            candidates.append((cost, -predicted, float(dm), gs, clients, predicted))
+    defense_points = max(1, int(np.ceil(candidates_per_round / 3)))
+    candidate_controls = [(float(dm), clients)
+                          for dm in np.linspace(0.0, 1.0, defense_points)
+                          for clients in range(MIN_PARTICIPATING_CLIENTS, CLIENTS_TOTAL + 1)]
+    candidate_controls = candidate_controls[:candidates_per_round]
+    for dm, clients in candidate_controls:
+        gs = gs_from_clients(clients)
+        predicted = predict(fit, ai, pa, float(dm), gs)
+        cost = (
+            weights["defense"] * float(dm) ** 2
+            + weights["participation"] * gs ** 2
+            + weights["defense_switch"] * (float(dm) - previous_dm) ** 2
+            + weights["participation_switch"] * (gs - previous_gs) ** 2
+        )
+        candidates.append((cost, -predicted, float(dm), gs, clients, predicted))
     preferred_candidates = [candidate for candidate in candidates if candidate[-1] >= preferred]
     minimum_candidates = [candidate for candidate in candidates if candidate[-1] >= target]
     if preferred_candidates:
@@ -341,7 +346,10 @@ def optimize_controls(fit: FitResult, ai: float, pa: float, previous_dm: float,
     }
 
 
-def dynamic_schedule(fit: FitResult) -> list[dict]:
+def dynamic_schedule(fit: FitResult, *, rounds: int = 12,
+                     candidates_per_round: int = 63, target: float = TARGET_Y,
+                     preferred: float = PREFERRED_Y,
+                     cost_weights: dict | None = None) -> list[dict]:
     """Run a 12-round dynamic controller under changing threat pressure."""
     # The 12th round explicitly exercises the maximum fitted attack intensity
     # (epsilon=0.30, AI=1.00).  Its PA=0.10 remains inside the fitted domain,
@@ -351,11 +359,16 @@ def dynamic_schedule(fit: FitResult) -> list[dict]:
     pa_path = [0.02, 0.02, 0.05, 0.10, 0.20, 0.40, 0.30, 0.15, 0.08, 0.02, 0.10, 0.10]
     previous_dm, previous_gs = 0.30, gs_from_clients(4)
     rows = []
-    for round_number, (epsilon, pa) in enumerate(zip(epsilon_path, pa_path), 1):
+    for round_number in range(1, rounds + 1):
+        epsilon, pa = epsilon_path[(round_number - 1) % len(epsilon_path)], pa_path[(round_number - 1) % len(pa_path)]
         ai = normalize_ai(epsilon)
-        control = optimize_controls(fit, ai, pa, previous_dm, previous_gs)
+        control = optimize_controls(fit, ai, pa, previous_dm, previous_gs,
+                                    target=target, preferred=preferred,
+                                    cost_weights=cost_weights,
+                                    candidates_per_round=candidates_per_round)
         rows.append({"round": round_number, "epsilon": epsilon, "AI": ai,
                      "PA": pa, **control,
+                     "candidate_policies_evaluated": candidates_per_round,
                      "deployment_decision": "accept" if control["status"] != "maximum_controls_target_unmet" else "reject_or_defer"})
         previous_dm, previous_gs = control["DM"], control["GS"]
     return rows
@@ -458,12 +471,24 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writeheader(); writer.writerows(rows)
 
 
-def main(output_dir: Path | None = None) -> None:
+def main(output_dir: Path | None = None, *, rounds: int = 12,
+         candidates_per_round: int = 63, target: float = TARGET_Y,
+         preferred: float = PREFERRED_Y, seed: int = SEED,
+         cost_weights: dict | None = None) -> None:
+    if rounds <= 0 or candidates_per_round < 3:
+        raise ValueError("Rounds must be positive and at least three candidate policies are required")
+    if not 0.0 <= target <= preferred <= 1.0:
+        raise ValueError("Response targets must satisfy 0 <= minimum <= preferred <= 1")
     output_dir = output_dir or OUT
     output_dir.mkdir(parents=True, exist_ok=True)
-    rows = generate_observations()
+    np.random.seed(seed)
+    weights = COST_WEIGHTS if cost_weights is None else cost_weights
+    rows = generate_observations(seed=seed)
     fit = fit_equation(rows)
-    schedule = dynamic_schedule(fit)
+    schedule = dynamic_schedule(fit, rounds=rounds,
+                                candidates_per_round=candidates_per_round,
+                                target=target, preferred=preferred,
+                                cost_weights=weights)
     sensitivity = cost_weight_sensitivity(fit)
     stresses = stress_scenarios(fit)
     ranges = acceptance_ranges()
@@ -493,9 +518,9 @@ def main(output_dir: Path | None = None) -> None:
     payload = asdict(fit)
     payload["equation"] = "Y_hat_(t+1) = B0 + B_AI*AI_t + B_PA*PA_t + B_DM*DM_t + B_GS*GS_t"
     payload["constraints_satisfied"] = all(row["satisfied"] for row in checks)
-    payload["target_Y"] = TARGET_Y
-    payload["preferred_Y"] = PREFERRED_Y
-    payload["seed"] = SEED
+    payload["target_Y"] = target
+    payload["preferred_Y"] = preferred
+    payload["seed"] = seed
     payload["simulation_design"] = "7 AI x 5 PA x 4 DM x 5 GS = 700 balanced observations"
     payload["simulation_ground_truth"] = GROUND_TRUTH
     payload["maximum_coefficient_recovery_error"] = max(
@@ -510,11 +535,10 @@ def main(output_dir: Path | None = None) -> None:
     payload["optimization_settings"] = {
         "minimum_participating_clients": MIN_PARTICIPATING_CLIENTS,
         "total_clients": CLIENTS_TOTAL,
-        "defense_grid_start": 0.0, "defense_grid_stop": 1.0,
-        "defense_grid_step": 0.05,
+        "candidate_policies_per_round": candidates_per_round,
         "client_candidates": list(range(MIN_PARTICIPATING_CLIENTS, CLIENTS_TOTAL + 1)),
-        "cost_weights": COST_WEIGHTS,
-        "preferred_target_Y": PREFERRED_Y, "minimum_target_Y": TARGET_Y,
+        "cost_weights": weights,
+        "preferred_target_Y": preferred, "minimum_target_Y": target,
     }
     payload["dynamic_definition"] = (
         "AI_t and PA_t are measured before each round; DM_t and GS_t are re-optimized; "
@@ -539,4 +563,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the constrained dynamic simulation.")
     parser.add_argument("--output-dir", type=Path, default=OUT,
                         help="Directory for simulation evidence (defaults to the repository evidence folder).")
-    main(parser.parse_args().output_dir)
+    parser.add_argument("--rounds", type=int, default=12)
+    parser.add_argument("--candidates-per-round", type=int, default=63)
+    parser.add_argument("--target-y", type=float, default=TARGET_Y)
+    parser.add_argument("--preferred-target-y", type=float, default=PREFERRED_Y)
+    parser.add_argument("--defense-cost-weight", type=float, default=COST_WEIGHTS["defense"])
+    parser.add_argument("--participation-cost-weight", type=float, default=COST_WEIGHTS["participation"])
+    parser.add_argument("--defense-switch-cost-weight", type=float, default=COST_WEIGHTS["defense_switch"])
+    parser.add_argument("--participation-switch-cost-weight", type=float, default=COST_WEIGHTS["participation_switch"])
+    parser.add_argument("--seed", type=int, default=SEED)
+    args = parser.parse_args()
+    main(args.output_dir, rounds=args.rounds,
+         candidates_per_round=args.candidates_per_round,
+         target=args.target_y, preferred=args.preferred_target_y, seed=args.seed,
+         cost_weights={"defense": args.defense_cost_weight,
+                       "participation": args.participation_cost_weight,
+                       "defense_switch": args.defense_switch_cost_weight,
+                       "participation_switch": args.participation_switch_cost_weight})

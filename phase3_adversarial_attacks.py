@@ -27,9 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=Path("do_fmbs_data"))
     parser.add_argument("--epsilons", default="0.01,0.05,0.10,0.20,0.30")
     parser.add_argument("--pgd-iterations", type=int, default=10)
+    parser.add_argument("--pgd-step-size", type=float, default=0.01)
     parser.add_argument("--poison-rate", type=float, default=0.10)
     parser.add_argument("--poison-epochs", type=int, default=3)
     parser.add_argument("--max-test-samples", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -52,12 +54,11 @@ def fgsm_face(model, face, finger, labels, epsilon: float):
     return tf.clip_by_value(face_tensor + epsilon * tf.sign(gradient), -6.0, 6.0)
 
 
-def pgd_face(model, face, finger, labels, epsilon: float, iterations: int):
+def pgd_face(model, face, finger, labels, epsilon: float, iterations: int, step_size: float):
     import tensorflow as tf
 
     original = tf.convert_to_tensor(face, tf.float32)
     adversarial = tf.identity(original)
-    alpha = epsilon / max(iterations // 2, 1)
     finger_tensor = tf.convert_to_tensor(finger, tf.float32)
     for _ in range(iterations):
         with tf.GradientTape() as tape:
@@ -67,7 +68,7 @@ def pgd_face(model, face, finger, labels, epsilon: float, iterations: int):
                 labels, output_tensor(outputs, "face_output", 0)
             ))
         gradient = tape.gradient(loss, adversarial)
-        adversarial = adversarial + alpha * tf.sign(gradient)
+        adversarial = adversarial + step_size * tf.sign(gradient)
         adversarial = tf.clip_by_value(adversarial, original - epsilon, original + epsilon)
         adversarial = tf.clip_by_value(adversarial, -6.0, 6.0)
     return adversarial
@@ -78,7 +79,22 @@ def face_probabilities(model, face, finger) -> np.ndarray:
     return np.asarray(output_tensor(outputs, "face_output", 0))
 
 
-def evaluate_evasion(model, face, finger, labels, epsilons, pgd_iterations):
+def exact_linf_projection(candidate: np.ndarray, origin: np.ndarray, epsilon: float) -> np.ndarray:
+    """Project to an L-infinity ball and correct float32 boundary overshoot."""
+    origin = np.asarray(origin, dtype=np.float32)
+    projected = np.clip(candidate.astype(np.float64),
+                        origin.astype(np.float64) - epsilon,
+                        origin.astype(np.float64) + epsilon).astype(np.float32)
+    outside = np.abs(projected.astype(np.float64) - origin.astype(np.float64)) > epsilon
+    projected[outside] = np.nextafter(projected[outside], origin[outside])
+    outside = np.abs(projected.astype(np.float64) - origin.astype(np.float64)) > epsilon
+    projected[outside] = origin[outside]
+    if np.any(np.abs(projected.astype(np.float64) - origin.astype(np.float64)) > epsilon):
+        raise RuntimeError("Unable to enforce configured L-infinity perturbation bound")
+    return projected
+
+
+def evaluate_evasion(model, face, finger, labels, epsilons, pgd_iterations, pgd_step_size):
     clean_prob = face_probabilities(model, face, finger)
     clean_pred = np.argmax(clean_prob, axis=1)
     eligible = clean_pred == labels
@@ -88,8 +104,11 @@ def evaluate_evasion(model, face, finger, labels, epsilons, pgd_iterations):
             if attack == "FGSM":
                 adversarial = fgsm_face(model, face, finger, labels, epsilon)
             else:
-                adversarial = pgd_face(model, face, finger, labels, epsilon, pgd_iterations)
-            attacked_pred = np.argmax(face_probabilities(model, adversarial, finger), axis=1)
+                adversarial = pgd_face(model, face, finger, labels, epsilon, pgd_iterations, pgd_step_size)
+            adversarial_array = exact_linf_projection(np.asarray(adversarial), face, float(epsilon))
+            max_abs_perturbation = (float(np.max(np.abs(adversarial_array.astype(np.float64)
+                                                       - face.astype(np.float64)))) if face.size else 0.0)
+            attacked_pred = np.argmax(face_probabilities(model, adversarial_array, finger), axis=1)
             successes = int(np.count_nonzero(eligible & (attacked_pred != labels)))
             rows.append({
                 "attack": attack, "modality": "face", "epsilon": float(epsilon),
@@ -97,15 +116,18 @@ def evaluate_evasion(model, face, finger, labels, epsilons, pgd_iterations):
                 "successful_attacks": successes,
                 "attack_success_rate": float(successes / max(np.count_nonzero(eligible), 1)),
                 "attacked_accuracy_all_samples": float(np.mean(attacked_pred == labels)),
+                "max_abs_perturbation": max_abs_perturbation,
+                "configured_step_size": float(pgd_step_size) if attack == "PGD" else None,
+                "perturbation_within_epsilon": bool(max_abs_perturbation <= float(epsilon)),
             })
     return rows
 
 
-def membership_inference_face(model, train_face, calibration_face) -> dict[str, float | int | str]:
+def membership_inference_face(model, train_face, calibration_face, seed: int = 42) -> dict[str, float | int | str]:
     train_conf = np.max(modality_probabilities(model, "face", train_face), axis=1)
     nonmember_conf = np.max(modality_probabilities(model, "face", calibration_face), axis=1)
     n = min(len(train_conf), len(nonmember_conf))
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
     train_conf = rng.choice(train_conf, n, replace=False)
     nonmember_conf = rng.choice(nonmember_conf, n, replace=False)
     truth = np.concatenate([np.ones(n), np.zeros(n)])
@@ -123,7 +145,8 @@ def membership_inference_face(model, train_face, calibration_face) -> dict[str, 
 
 
 def poisoning_attack(model, face_x, face_y, finger_x, finger_y, face_test, face_test_y,
-                     finger_test, finger_test_y, rate: float, epochs: int) -> dict[str, object]:
+                     finger_test, finger_test_y, rate: float, epochs: int,
+                     seed: int = 3301) -> dict[str, object]:
     import tensorflow as tf
 
     poisoned = compile_dual_branch_model(tf.keras.models.clone_model(model), learning_rate=5e-4)
@@ -133,7 +156,7 @@ def poisoning_attack(model, face_x, face_y, finger_x, finger_y, face_test, face_
     finger_order = np.resize(np.arange(len(finger_y)), n)
     py_face = face_y[face_order].copy()
     py_finger = finger_y[finger_order].copy()
-    rng = np.random.default_rng(3301)
+    rng = np.random.default_rng(seed)
     count = max(1, int(rate * n))
     selected = rng.choice(n, count, replace=False)
     py_face[selected] = (py_face[selected] + 1) % int(model.get_layer("face_output").units)
@@ -159,9 +182,15 @@ def poisoning_attack(model, face_x, face_y, finger_x, finger_y, face_test, face_
 
 def main() -> int:
     args = parse_args()
-    set_global_determinism()
-    started = time.perf_counter()
     epsilons = sorted({float(value) for value in args.epsilons.split(",")})
+    if not epsilons or any(value < 0 or value > 1 for value in epsilons):
+        raise ValueError("Epsilons must be a non-empty list between 0 and 1")
+    if args.pgd_iterations <= 0 or args.pgd_step_size <= 0 or args.poison_epochs <= 0:
+        raise ValueError("PGD iterations, PGD step size and poisoning epochs must be positive")
+    if not 0 < args.poison_rate <= 0.5 or args.max_test_samples < 0:
+        raise ValueError("Poison rate must be in (0, 0.5] and sample cap cannot be negative")
+    set_global_determinism(args.seed)
+    started = time.perf_counter()
     import tensorflow as tf
 
     with np.load(args.data_dir / "face_data.npz", allow_pickle=False) as face:
@@ -179,12 +208,14 @@ def main() -> int:
     neutral_finger = np.zeros((limit, finger_dim), dtype=np.float32)
 
     evasion = evaluate_evasion(
-        model, face_attack, neutral_finger, face_attack_y, epsilons, args.pgd_iterations
+        model, face_attack, neutral_finger, face_attack_y, epsilons,
+        args.pgd_iterations, args.pgd_step_size,
     )
-    membership = membership_inference_face(model, face_train, face_cal)
+    membership = membership_inference_face(model, face_train, face_cal, seed=args.seed)
     poisoning = poisoning_attack(
         model, face_train, face_train_y, finger_train, finger_train_y,
-        face_test, face_test_y, finger_test, finger_test_y, args.poison_rate, args.poison_epochs,
+        face_test, face_test_y, finger_test, finger_test_y, args.poison_rate,
+        args.poison_epochs, seed=args.seed + (3301 - 42),
     )
     results = {
         "phase": 3, "replay_id": os.environ.get("DO_FMBS_REPLAY_ID", "unspecified"),
@@ -192,8 +223,9 @@ def main() -> int:
         "scope_statement": "FGSM and PGD perturb the face input only; no fingerprint evasion-robustness claim is made.",
         "evasion": evasion, "membership_inference": membership, "label_flipping_poisoning": poisoning,
         "parameters": {"epsilons": epsilons, "pgd_iterations": args.pgd_iterations,
+                       "pgd_step_size": args.pgd_step_size,
                        "poison_rate": args.poison_rate, "poison_epochs": args.poison_epochs,
-                       "face_attack_samples": limit},
+                       "face_attack_samples": limit, "seed": args.seed},
         "runtime_seconds": time.perf_counter() - started,
     }
     json_dump(args.data_dir / "phase3_attack_results.json", results)

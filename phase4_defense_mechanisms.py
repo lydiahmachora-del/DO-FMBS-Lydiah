@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--noise-stddev", type=float, default=GAUSSIAN_NOISE_STDDEV)
     parser.add_argument("--adversarial-epsilon", type=float, default=ADVERSARIAL_EPSILON)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -93,14 +95,15 @@ def fingerprint_gradient_norms(model, face_x, face_y, finger_x, finger_y) -> dic
 
 def fine_tune(model, face_x, face_y, finger_x, finger_y, *, epochs: int,
               batch_size: int, adversarial: bool, epsilon: float,
-              noise_stddev: float) -> list[dict[str, float]]:
+              noise_stddev: float, learning_rate: float = 5e-4,
+              seed: int = 42) -> list[dict[str, float]]:
     import tensorflow as tf
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-4)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     history = []
     for epoch in range(epochs):
         ex, ey, px, py = synchronized_epoch_arrays(
-            face_x, face_y, finger_x, finger_y, 4400 + epoch
+            face_x, face_y, finger_x, finger_y, seed + epoch
         )
         losses, face_losses, finger_losses = [], [], []
         for start in range(0, len(ey), batch_size):
@@ -172,9 +175,9 @@ def clone_from(model):
 
 def main() -> int:
     args = parse_args()
-    if args.epochs <= 0 or args.batch_size <= 0 or args.noise_stddev < 0:
+    if args.epochs <= 0 or args.batch_size <= 0 or args.noise_stddev < 0 or args.learning_rate <= 0 or args.adversarial_epsilon < 0:
         raise ValueError("Invalid defense-training parameters")
-    set_global_determinism()
+    set_global_determinism(args.seed)
     started = time.perf_counter()
     import tensorflow as tf
 
@@ -200,12 +203,13 @@ def main() -> int:
             model, face_train, face_train_y, finger_train, finger_train_y,
             epochs=args.epochs, batch_size=args.batch_size,
             adversarial=configuration["adversarial"], epsilon=args.adversarial_epsilon,
-            noise_stddev=configuration["noise_stddev"],
+            noise_stddev=configuration["noise_stddev"], learning_rate=args.learning_rate,
+            seed=4400 + (args.seed - 42),
         )
         models[name] = model
 
     gradient_face, gradient_face_y, gradient_finger, gradient_finger_y = synchronized_epoch_arrays(
-        face_train, face_train_y, finger_train, finger_train_y, 9981
+        face_train, face_train_y, finger_train, finger_train_y, 9981 + (args.seed - 42)
     )
     gradient_norms = fingerprint_gradient_norms(
         models["do_fmbs_combined"], gradient_face[:args.batch_size], gradient_face_y[:args.batch_size],
@@ -230,6 +234,7 @@ def main() -> int:
         "parameters": {"epochs": args.epochs, "batch_size": args.batch_size,
                        "gaussian_gradient_noise_stddev": args.noise_stddev,
                        "face_adversarial_epsilon": args.adversarial_epsilon,
+                       "learning_rate": args.learning_rate, "seed": args.seed,
                        "per_example_clipping": False, "privacy_accountant": False,
                        "epsilon_delta_reported": False},
         "fingerprint_gradient_norms": gradient_norms,

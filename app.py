@@ -20,6 +20,10 @@ from phase3_dashboard import render_phase3_authoritative
 from phase4_dashboard import render_phase4_authoritative
 from phase5_dashboard import render_phase5_authoritative
 from phase6_dashboard import render_phase6_authoritative
+from phase_configuration import (
+    CONFIG_VERSION, PHASE_SCHEMAS, changed_parameters, cli_arguments,
+    defaults_for_all_phases, phase_defaults, validate_phase_config,
+)
 from research_consolidation_dashboard import ACCEPTED_RUNS, render_research_consolidation
 
 
@@ -384,14 +388,151 @@ def start_new_replay() -> Path:
     return run_dir
 
 
+def read_run_configuration(run_dir: Path | None) -> dict[str, dict]:
+    path = run_dir / "run_config.json" if run_dir else None
+    payload = load_json(path) if path else None
+    phases = (payload or {}).get("phases", {})
+    return {f"phase{phase}": validate_phase_config(phase, phases.get(f"phase{phase}", {}))
+            for phase in range(1, 7)}
+
+
+def save_run_configuration(run_dir: Path, configurations: dict[str, dict]) -> Path:
+    validated = {f"phase{phase}": validate_phase_config(
+        phase, configurations.get(f"phase{phase}", {})) for phase in range(1, 7)}
+    payload = {"run_id": run_dir.name, "configuration_version": CONFIG_VERSION,
+               "created_at": datetime.now(ZoneInfo("Africa/Nairobi")).isoformat(timespec="seconds"),
+               "default_preset": "research_defaults", "phases": validated}
+    path = run_dir / "run_config.json"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _form_key(phase: int, parameter: str) -> str:
+    return f"phase_config_{phase}_{parameter}"
+
+
+def open_phase_configuration(phase_number: int | None, run_dir: Path | None = None) -> None:
+    st.session_state["pending_phase_configuration"] = "all" if phase_number is None else phase_number
+    st.session_state["pending_configuration_run_dir"] = str(run_dir) if run_dir else ""
+    configurations = read_run_configuration(run_dir) if phase_number is not None else defaults_for_all_phases()
+    selected_phases = range(1, 7) if phase_number is None else [phase_number]
+    for phase in selected_phases:
+        for parameter, value in configurations[f"phase{phase}"].items():
+            st.session_state[_form_key(phase, parameter)] = value if not isinstance(value, list) else ", ".join(map(str, value))
+
+
+def request_configuration_reset(phase_number: int | None) -> None:
+    st.session_state["pending_configuration_reset"] = "all" if phase_number is None else int(phase_number)
+
+
+@st.dialog("Configure research phase", width="large")
+def phase_configuration_dialog(phase_number: int | None) -> None:
+    all_phases = phase_number is None
+    selected_phases = range(1, 7) if all_phases else [int(phase_number)]
+    reset_pending = st.session_state.pop("pending_configuration_reset", None)
+    if reset_pending is not None:
+        reset_phases = range(1, 7) if reset_pending == "all" else [int(reset_pending)]
+        for phase in reset_phases:
+            for name, value in phase_defaults(phase).items():
+                st.session_state[_form_key(phase, name)] = value if not isinstance(value, list) else ", ".join(map(str, value))
+    st.caption("Research defaults are prefilled. Modified values are validated and saved with this isolated execution.")
+    if all_phases:
+        st.markdown("### Run All Phases")
+        st.warning("This starts a new isolated pipeline. Every downstream phase consumes artifacts from this same run.")
+    else:
+        phase = PHASES[int(phase_number) - 1]
+        st.markdown(f"### Phase {phase_number} · {phase['name']}")
+        st.write(phase["purpose"])
+    draft: dict[str, dict] = {}
+    for phase in selected_phases:
+        with st.expander(f"Phase {phase} · {PHASES[phase - 1]['name']}", expanded=not all_phases):
+            values = {}
+            for name, spec in PHASE_SCHEMAS[phase].items():
+                key = _form_key(phase, name)
+                default = phase_defaults(phase)[name]
+                if key not in st.session_state:
+                    st.session_state[key] = default if not isinstance(default, list) else ", ".join(map(str, default))
+                st.caption(f"{spec['description']} Range: {spec['min']}–{spec['max']} {spec['unit']}. Research default: {default}.")
+                if spec["type"] == "int":
+                    st.number_input(spec["label"], min_value=int(spec["min"]), max_value=int(spec["max"]),
+                                    step=1, key=key)
+                elif spec["type"] == "float":
+                    step = 0.0001 if spec["min"] < 0.001 else (0.001 if spec["min"] < 0.1 else 0.01)
+                    st.number_input(spec["label"], min_value=float(spec["min"]), max_value=float(spec["max"]),
+                                    step=step, format="%.6f", key=key)
+                else:
+                    st.text_input(f"{spec['label']} ({spec['unit']})", key=key,
+                                  help="Enter comma-separated numeric values in ascending order.")
+                values[name] = st.session_state[key]
+            draft[f"phase{phase}"] = values
+            try:
+                normalized = {name: ([float(v.strip()) for v in value.split(",") if v.strip()]
+                                     if PHASE_SCHEMAS[phase][name]["type"] == "float_list" else value)
+                              for name, value in values.items()}
+                normalized = validate_phase_config(phase, normalized)
+                changed = changed_parameters(phase, normalized)
+                st.caption("Modified from research defaults: " + (", ".join(changed) if changed else "None"))
+                with st.expander("Configuration preview", expanded=False):
+                    st.json({"phase": phase, "values": normalized,
+                             "changed_parameters": changed}, expanded=True)
+                draft[f"phase{phase}"] = normalized
+            except (TypeError, ValueError) as error:
+                st.error(f"Configuration validation: {error}")
+
+    controls = st.columns(3)
+    if controls[0].button("Reset to research defaults", key="reset_phase_config",
+                          on_click=request_configuration_reset, args=(phase_number,)):
+        pass
+    if controls[1].button("Cancel", key="cancel_phase_config"):
+        st.session_state.pop("pending_phase_configuration", None)
+        st.rerun()
+    submit_label = "Configure and Run All Phases" if all_phases else f"Run Phase {phase_number}"
+    submitted = controls[2].button(submit_label, type="primary", key="submit_phase_config")
+    if not submitted:
+        return
+    try:
+        configurations = defaults_for_all_phases() if all_phases else read_run_configuration(
+            Path(st.session_state["pending_configuration_run_dir"])
+        ) if st.session_state.get("pending_configuration_run_dir") else defaults_for_all_phases()
+        for phase in selected_phases:
+            values = {name: st.session_state[_form_key(phase, name)] for name in PHASE_SCHEMAS[phase]}
+            for name, spec in PHASE_SCHEMAS[phase].items():
+                if spec["type"] == "float_list":
+                    try:
+                        values[name] = [float(value.strip()) for value in values[name].split(",") if value.strip()]
+                    except ValueError as error:
+                        raise ValueError(f"{name} must contain comma-separated numbers") from error
+            configurations[f"phase{phase}"] = validate_phase_config(phase, values)
+    except (TypeError, ValueError) as error:
+        st.error(f"Cannot start: {error}")
+        return
+    if all_phases:
+        run_dir = start_new_replay()
+    else:
+        raw_run_dir = st.session_state.get("pending_configuration_run_dir", "")
+        run_dir = Path(raw_run_dir) if raw_run_dir else start_new_replay()
+    save_run_configuration(run_dir, configurations)
+    st.session_state.pop("pending_phase_configuration", None)
+    st.session_state["selected_page"] = SIMULATION_PAGE
+    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
+    if all_phases:
+        run_all_phases(configurations, run_dir=run_dir)
+    else:
+        execute_phase(int(phase_number), run_dir)
+
+
 def clear_diagnostic_page() -> None:
     st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
 
 
 def execute_phase(phase_number: int, run_dir: Path, rerun_after: bool = True) -> bool:
+    config_path = run_dir / "run_config.json"
+    if not config_path.is_file():
+        save_run_configuration(run_dir, read_run_configuration(run_dir))
     command = [
         sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
         "--start-phase", str(phase_number), "--end-phase", str(phase_number), "--resume",
+        "--config-file", str(config_path),
     ]
     if not run_streamed(command, f"Phase {phase_number}: {PHASES[phase_number - 1]['name']}"):
         return False
@@ -419,8 +560,11 @@ def return_to_simulation() -> None:
     st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
 
 
-def run_all_phases() -> None:
-    run_dir = start_new_replay()
+def run_all_phases(configurations: dict[str, dict] | None = None,
+                   run_dir: Path | None = None) -> None:
+    run_dir = run_dir or start_new_replay()
+    configurations = configurations or defaults_for_all_phases()
+    config_path = save_run_configuration(run_dir, configurations)
     progress = st.progress(0, text="Preparing a new isolated run")
     stage = st.empty()
 
@@ -438,11 +582,99 @@ def run_all_phases() -> None:
             stage.error(f"Phase {phase_number} failed · {phase_name}")
 
     command = [sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
-               "--start-phase", "1", "--end-phase", "6", "--resume"]
+               "--start-phase", "1", "--end-phase", "6", "--resume",
+               "--config-file", str(config_path)]
     if run_streamed(command, "Six-phase simulation", phase_progress=show_phase_progress):
         progress.progress(1.0, text="Six phases complete · publishing evidence")
         stage.success("All six phases completed. Finalizing this isolated run.")
         finalize_replay(run_dir, rerun_after=False)
+
+
+def completed_interactive_runs(phase: int | None = None) -> list[Path]:
+    matches = []
+    for path in RUN_ROOT.glob("interactive_replay_*"):
+        if not path.is_dir() or not (path / "run_config.json").is_file():
+            continue
+        registry = load_json(path / "phase_runtime_registry.json") or {}
+        completed = {int(row.get("phase", 0)) for row in registry.get("records", [])
+                     if row.get("status") == "EXECUTION-COMPLETED" and int(row.get("exit_code", 1)) == 0}
+        if phase is None or phase in completed:
+            matches.append(path)
+    return sorted(matches, key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def phase_run_metrics(run_dir: Path, phase: int) -> dict:
+    data_dir = run_dir / "do_fmbs_data"
+    if phase == 1:
+        payload = load_json(data_dir / "phase1_metadata.json") or {}
+        return {"face_samples": payload.get("face", {}).get("total"),
+                "fingerprint_samples": payload.get("fingerprint", {}).get("total"),
+                "fingerprint_identities": payload.get("fingerprint", {}).get("identities"),
+                "impressions_per_identity": payload.get("fingerprint", {}).get("impressions_per_identity")}
+    if phase == 2:
+        payload = load_json(data_dir / "phase2_metrics.json") or {}
+        return {"rounds": len(payload.get("history", {}).get("round", [])),
+                "face_accuracy": payload.get("face_classification", {}).get("accuracy"),
+                "fingerprint_accuracy": payload.get("fingerprint_classification", {}).get("accuracy"),
+                "training_parameters": payload.get("training_parameters")}
+    if phase == 3:
+        payload = load_json(data_dir / "phase3_attack_results.json") or {}
+        return {"face_attack_samples": payload.get("parameters", {}).get("face_attack_samples"),
+                "attack_settings": payload.get("parameters"),
+                "membership_accuracy": payload.get("membership_inference", {}).get("attack_accuracy"),
+                "evasion_rows": len(payload.get("evasion", []))}
+    if phase == 4:
+        payload = load_json(data_dir / "phase4_defense_results.json") or {}
+        return {"defense_conditions": list(payload.get("comparison", {})),
+                "parameters": payload.get("parameters"),
+                "face_accuracy": {name: item.get("face_classification", {}).get("accuracy")
+                                  for name, item in payload.get("comparison", {}).items()}}
+    if phase == 5:
+        payload = load_json(data_dir / "phase5_validation.json") or {}
+        return {"evaluation": payload.get("evaluation"),
+                "bootstrap_repetitions": payload.get("bootstrap_repetitions"),
+                "face_accuracy": payload.get("face", {}).get("classification", {}).get("accuracy"),
+                "fingerprint_accuracy": payload.get("fingerprint", {}).get("classification", {}).get("accuracy")}
+    payload = load_json(run_dir / "simulation_evidence" / "constrained_dynamic_model" / "model_fit.json") or {}
+    schedule_path = run_dir / "simulation_evidence" / "constrained_dynamic_model" / "dynamic_optimization_schedule.csv"
+    schedule_count = len(pd.read_csv(schedule_path)) if schedule_path.is_file() else 0
+    return {"controller_rounds": schedule_count, "observations": payload.get("observations"),
+            "candidate_policies_per_round": payload.get("optimization_settings", {}).get("candidate_policies_per_round"),
+            "r_squared": payload.get("r_squared"),
+            "optimization_settings": payload.get("optimization_settings")}
+
+
+def render_run_comparison() -> None:
+    with st.expander("Compare interactive executions", expanded=True):
+        if len(completed_interactive_runs()) < 2:
+            st.info("Complete at least two interactive runs containing the same phase to compare actual configurations and outputs.")
+            return
+        phase_options = [phase for phase in range(1, 7) if len(completed_interactive_runs(phase)) >= 2]
+        if not phase_options:
+            st.info("No phase has two completed interactive executions yet.")
+            return
+        phase = st.selectbox("Phase to compare", phase_options,
+                             format_func=lambda value: f"Phase {value} · {PHASES[value - 1]['name']}")
+        candidates = completed_interactive_runs(phase)
+        options = [str(path) for path in candidates]
+        selected = st.multiselect("Select two or more completed runs", options,
+                                  default=options[:2], format_func=lambda value: Path(value).name)
+        if len(selected) < 2:
+            st.info("Select at least two runs for comparison.")
+            return
+        rows = []
+        for raw_path in selected:
+            path = Path(raw_path)
+            config = load_json(path / f"phase{phase}_config.json") or {}
+            registry = load_json(path / "phase_runtime_registry.json") or {}
+            record = next((row for row in registry.get("records", []) if int(row.get("phase", 0)) == phase), {})
+            rows.append({"Run ID": path.name, "Timestamp": record.get("start_timestamp"),
+                         "Status": record.get("status", config.get("status")),
+                         "Changed parameters": ", ".join(config.get("changed_parameters", [])) or "None",
+                         "Configuration": json.dumps(config.get("configuration", {}), sort_keys=True),
+                         "Metrics from artifacts": json.dumps(phase_run_metrics(path, phase), sort_keys=True)})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Differences are descriptive; they do not establish causality unless runs are controlled and stochastic seeds are considered.")
 
 
 def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: dict | None) -> None:
@@ -450,14 +682,16 @@ def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: 
     st.caption("Run all six phases in a new isolated run, or continue one phase at a time with its prerequisites enforced.")
     if run_dir:
         st.info(f"Current run: `{run_dir.name}`. A new full run creates a different run ID and leaves this run and all accepted results intact.")
-        st.button("Run All Phases · New Run", type="primary", key="run_all_phases", on_click=run_all_phases)
+        st.button("Run All Phases · New Run", type="primary", key="run_all_phases",
+                  on_click=open_phase_configuration, args=(None,))
         if st.button("Start a new run", key="new_interactive_run"):
             start_new_replay()
             st.rerun()
     else:
         st.info("No interactive run is selected. A run started here receives its own folder, configuration, seeds, and phase logs.")
         all_col, one_col = st.columns(2)
-        all_col.button("Run All Phases · New Run", type="primary", key="run_all_phases_empty", on_click=run_all_phases)
+        all_col.button("Run All Phases · New Run", type="primary", key="run_all_phases_empty",
+                       on_click=open_phase_configuration, args=(None,))
         if one_col.button("Start a run for individual phases", key="new_interactive_run_empty"):
             start_new_replay()
             st.rerun()
@@ -493,33 +727,59 @@ def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: 
                               on_click=view_phase_results, args=(number,), use_container_width=True)
             elif run_dir and prerequisite_met:
                 column.button(f"Run Phase {number}", key=f"run_phase_{number}",
-                              on_click=execute_phase, args=(number, run_dir, False), type="primary",
+                              on_click=open_phase_configuration, args=(number, run_dir), type="primary",
                               use_container_width=True)
             elif not run_dir and number == 1:
                 column.button("Start run · Phase 1", key="run_phase_1_empty", type="primary",
-                              on_click=start_and_run_phase_one)
+                              on_click=open_phase_configuration, args=(1, None))
+            elif not run_dir:
+                column.button("Waiting for Phase 1", key=f"phase_waiting_{number}_without_run",
+                              disabled=True, use_container_width=True)
+                column.caption("Start a new run and complete Phase 1 first.")
             else:
                 column.button("Waiting for prerequisite", key=f"phase_waiting_{number}", disabled=True,
                               use_container_width=True)
                 if not prerequisite_met:
                     column.caption(f"Available after Phase {number - 1} completes.")
+    render_run_comparison()
     if len(done) == 6 and manifest:
         st.success("This interactive run is complete. Use the View Results buttons above to inspect its saved phase outputs; Cross-Phase Analysis presents the accepted research runs.")
 
 
 def finalize_replay(run_dir: Path, rerun_after: bool = True) -> bool:
-    if not run_streamed(
-        [sys.executable, "-u", str(AUDITOR), "--run-dir", str(run_dir)],
-        "Independent replay audit",
-    ):
+    manifest_path = run_dir / "interactive_experiment_manifest.json"
+    existing_manifest = load_json(manifest_path)
+    if existing_manifest and existing_manifest.get("status") == "COMPLETED-EXPLORATORY-NOT-AUTHORITATIVE":
+        st.success("All six exploratory phases completed. Configuration and artifact hashes are recorded separately from accepted research evidence.")
+        if rerun_after:
+            st.rerun()
+        return True
+    registry = load_json(run_dir / "phase_runtime_registry.json") or {}
+    records = registry.get("records", [])
+    complete = {int(row.get("phase", 0)) for row in records
+                if row.get("status") == "EXECUTION-COMPLETED" and int(row.get("exit_code", 1)) == 0}
+    if complete != set(range(1, 7)):
+        st.error("The exploratory run manifest was not written because all six phases have not completed successfully.")
         return False
-    manifest_path = run_dir / "do_fmbs_data" / "final_evidence_manifest.json"
-    if not run_streamed(
-        [sys.executable, "-u", str(MANIFEST_BUILDER), "--run-dir", str(run_dir), "--publish-path", str(manifest_path)],
-        "Build synchronized evidence manifest",
-    ):
-        return False
-    st.success("All six phases completed. Independent audit passed and the replay manifest is ready.")
+    artifacts = []
+    for path in sorted(run_dir.rglob("*")):
+        if not path.is_file() or path.name == "interactive_experiment_manifest.json":
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifacts.append({"path": path.relative_to(run_dir).as_posix(), "bytes": path.stat().st_size,
+                          "sha256": digest})
+    payload = {"status": "COMPLETED-EXPLORATORY-NOT-AUTHORITATIVE",
+               "run_id": run_dir.name, "created_at": datetime.now(ZoneInfo("Africa/Nairobi")).isoformat(),
+               "configuration_version": CONFIG_VERSION,
+               "scientific_status": "Exploratory configurable execution; not an accepted thesis run or independent scientific audit.",
+               "configuration": load_json(run_dir / "run_config.json"),
+               "phase_records": records, "artifacts": artifacts,
+               "validation": {"all_six_phases_completed": True,
+                              "artifact_inventory_with_sha256": True,
+                              "independent_authoritative_audit": False}}
+    (run_dir / "interactive_experiment_manifest.json").write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    st.success("All six exploratory phases completed. Configuration and artifact hashes are recorded separately from accepted research evidence.")
     if rerun_after:
         st.rerun()
     return True
@@ -885,6 +1145,12 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     if configuration:
         with st.expander("Recorded configuration", expanded=False):
             st.json(configuration, expanded=False)
+    actual_config = load_json(run_dir / f"phase{number}_config.json") if run_dir else None
+    if actual_config:
+        with st.expander("Submitted configuration and backend provenance", expanded=True):
+            st.write(f"Status: **{actual_config.get('status', 'recorded')}** · schema {actual_config.get('configuration_version', 'unknown')}")
+            st.write("Changed parameters: " + (", ".join(actual_config.get("changed_parameters", [])) or "None; research defaults used"))
+            st.json(actual_config.get("configuration", {}), expanded=True)
 
     phase_is_next = number == 1 or all(index in completed for index in range(1, number))
     if run_dir is None:
@@ -899,11 +1165,11 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
             st.caption("This run is retained as recorded. Start a new run to execute the workflow again.")
         else:
             st.caption("Results are saved to this run's isolated folder.")
-            if st.button(f"Run Phase {number}", type="primary"):
-                execute_phase(number, run_dir)
-        if number == 6 and done and not manifest:
-            st.error("Phase 6 completed, but final evidence could not be published.")
-            if st.button("Retry evidence publication", type="primary"):
+            st.button(f"Configure & Run Phase {number}", type="primary",
+                      on_click=open_phase_configuration, args=(number, run_dir))
+        if number == 6 and done and not (run_dir / "interactive_experiment_manifest.json").is_file():
+            st.error("Phase 6 completed, but the exploratory run manifest is missing.")
+            if st.button("Rebuild exploratory run manifest", type="primary"):
                 finalize_replay(run_dir)
     else:
         waiting_for = next((index for index in range(1, number) if index not in completed), None)
@@ -942,6 +1208,21 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                     ]), use_container_width=True, hide_index=True)
                 else:
                     st.json(payload, expanded=False)
+        elif number == 6:
+            output_dir = run_dir / "simulation_evidence" / "constrained_dynamic_model"
+            fit = load_json(output_dir / "model_fit.json")
+            schedule_path = output_dir / "dynamic_optimization_schedule.csv"
+            if fit and schedule_path.is_file():
+                schedule = pd.read_csv(schedule_path)
+                metric_card_row([("Simulation observations", str(fit.get("observations", "—"))),
+                                 ("Controller rounds", str(len(schedule))),
+                                 ("Candidate policies / round", str(fit.get("optimization_settings", {}).get("candidate_policies_per_round", "—"))),
+                                 ("R²", f"{float(fit.get('r_squared', 0.0)):.4f}")])
+                st.line_chart(schedule.set_index("round")[["predicted_Y", "control_cost"]], height=300)
+                st.dataframe(schedule, use_container_width=True, hide_index=True)
+                st.caption("Synthetic constrained-response simulation; values are generated by this exploratory run's saved configuration, not by the federated model.")
+            else:
+                st.info("Optimization outputs are not available for this run.")
         else:
             st.info("Optimization outputs are saved with this run's simulation evidence.")
 
@@ -987,7 +1268,7 @@ def render_research_scope() -> None:
 
 
 def render_phase1_rebuild() -> None:
-    st.title("Phase 1 · Data preparation")
+    st.title("Phase 1 · Chapter Four (Authoritative)")
     st.caption("Face and synthetic fingerprint datasets, preprocessing, verification partitions, and identity-exclusive client allocation.")
     runs = sorted((path for pattern in ("phase1_reimplementation_*", "phase1_final_candidate_*")
                    for path in RUN_ROOT.glob(pattern)
@@ -1004,7 +1285,7 @@ def render_phase1_rebuild() -> None:
     else:
         data_dir = Path(current) if current else None
 
-    if st.button("Run Phase 1", type="primary", key="start_source_faithful_phase1"):
+    if st.button("Start final-candidate Phase 1 replay", type="primary", key="start_source_faithful_phase1"):
         stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
         output = RUN_ROOT / f"phase1_final_candidate_{stamp}"
         suffix = 1
@@ -1315,3 +1596,7 @@ else:
     if selected_page in {phase["page"] for phase in PHASES}:
         phase = next(item for item in PHASES if item["page"] == selected_page)
         render_phase_page(phase, manifest, run_dir, records, done)
+
+pending_configuration = st.session_state.get("pending_phase_configuration")
+if pending_configuration is not None:
+    phase_configuration_dialog(None if pending_configuration == "all" else int(pending_configuration))

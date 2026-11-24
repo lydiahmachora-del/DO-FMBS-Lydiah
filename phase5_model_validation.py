@@ -35,7 +35,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=Path("do_fmbs_data"))
     parser.add_argument("--bootstrap-repetitions", type=int, default=2000)
     parser.add_argument("--robustness-epsilons", default="0.00,0.05,0.10,0.15,0.20")
+    parser.add_argument("--evaluation-sample-count", type=int, default=0,
+                        help="Maximum samples from each calibration/test partition; zero uses all records.")
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def sample_partition(features: np.ndarray, labels: np.ndarray, limit: int,
+                     rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    if limit <= 0 or len(labels) <= limit:
+        return features, labels
+    selected = np.sort(rng.choice(len(labels), size=limit, replace=False))
+    return features[selected], labels[selected]
 
 
 def classification_summary(labels: np.ndarray, probabilities: np.ndarray) -> tuple[dict, np.ndarray, np.ndarray]:
@@ -81,16 +92,19 @@ def save_classification_artifacts(data_dir: Path, modality: str, labels: np.ndar
 
 def verification_protocol(model, modality: str, calibration_x: np.ndarray,
                           calibration_y: np.ndarray, test_x: np.ndarray,
-                          test_y: np.ndarray, repetitions: int) -> tuple[dict, dict[str, np.ndarray]]:
+                          test_y: np.ndarray, repetitions: int,
+                          seed: int = 42) -> tuple[dict, dict[str, np.ndarray]]:
     calibration_prob = modality_probabilities(model, modality, calibration_x)
     test_prob = modality_probabilities(model, modality, test_x)
     calibration_genuine, calibration_impostor, _ = claimed_identity_scores(calibration_prob, calibration_y)
     threshold, calibration_eer = select_eer_threshold(calibration_genuine, calibration_impostor)
     calibration_metrics = verification_metrics(
-        calibration_prob, calibration_y, threshold, bootstrap_repetitions=repetitions
+        calibration_prob, calibration_y, threshold, bootstrap_repetitions=repetitions,
+        bootstrap_seed=seed,
     )
     final_metrics = verification_metrics(
-        test_prob, test_y, threshold, bootstrap_repetitions=repetitions
+        test_prob, test_y, threshold, bootstrap_repetitions=repetitions,
+        bootstrap_seed=seed,
     )
     test_genuine, test_impostor, _ = claimed_identity_scores(test_prob, test_y)
     payload = {
@@ -210,8 +224,11 @@ def mcnemar_record(baseline_pred, final_pred, labels, modality: str) -> dict[str
 
 def main() -> int:
     args = parse_args()
-    if args.bootstrap_repetitions < 100:
-        raise ValueError("Use at least 100 identity-bootstrap repetitions")
+    if args.bootstrap_repetitions < 100 or args.evaluation_sample_count < 0:
+        raise ValueError("Use at least 100 bootstrap repetitions and a non-negative evaluation cap")
+    epsilons = [float(value) for value in args.robustness_epsilons.split(",")]
+    if not epsilons or any(value < 0 or value > 1 for value in epsilons):
+        raise ValueError("Robustness epsilons must be a non-empty list between 0 and 1")
     set_global_determinism()
     started = time.perf_counter()
     import tensorflow as tf
@@ -222,6 +239,11 @@ def main() -> int:
     with np.load(args.data_dir / "fingerprint_data.npz", allow_pickle=False) as finger:
         finger_cal, finger_cal_y = finger["X_calibration"].astype(np.float32), finger["y_calibration"]
         finger_test, finger_test_y = finger["X_test"].astype(np.float32), finger["y_test"]
+    rng = np.random.default_rng(args.seed)
+    face_cal, face_cal_y = sample_partition(face_cal, face_cal_y, args.evaluation_sample_count, rng)
+    face_test, face_test_y = sample_partition(face_test, face_test_y, args.evaluation_sample_count, rng)
+    finger_cal, finger_cal_y = sample_partition(finger_cal, finger_cal_y, args.evaluation_sample_count, rng)
+    finger_test, finger_test_y = sample_partition(finger_test, finger_test_y, args.evaluation_sample_count, rng)
     baseline = tf.keras.models.load_model(args.data_dir / "baseline_model.keras")
     final_model = tf.keras.models.load_model(args.data_dir / "do_fmbs_model.keras")
 
@@ -245,14 +267,13 @@ def main() -> int:
         ))
         verification, arrays = verification_protocol(
             final_model, modality, calibration_x, calibration_y, test_x, test_y,
-            args.bootstrap_repetitions,
+            args.bootstrap_repetitions, args.seed,
         )
         artifacts.extend(save_verification_artifacts(args.data_dir, modality, verification, arrays))
         modality_payloads[modality] = {"classification": summary, "verification": verification}
         statistical.append(mcnemar_record(baseline_pred, final_pred, test_y, modality))
         predictions[modality] = (baseline_pred, final_pred)
 
-    epsilons = [float(value) for value in args.robustness_epsilons.split(",")]
     finger_dim = int(final_model.get_layer("finger_input").input.shape[-1])
     robustness = {
         "scope": "FGSM evaluation on the face classification branch only",
@@ -284,6 +305,12 @@ def main() -> int:
         "face": modality_payloads["face"], "fingerprint": modality_payloads["fingerprint"],
         "statistical_validation": statistical, "robustness": robustness,
         "bootstrap_repetitions": args.bootstrap_repetitions,
+        "evaluation": {"requested_sample_cap_per_partition": args.evaluation_sample_count,
+                       "seed": args.seed,
+                       "face_calibration_samples": int(len(face_cal_y)),
+                       "face_test_samples": int(len(face_test_y)),
+                       "fingerprint_calibration_samples": int(len(finger_cal_y)),
+                       "fingerprint_test_samples": int(len(finger_test_y))},
         "artifacts": artifacts, "runtime_seconds": time.perf_counter() - started,
     }
     json_dump(args.data_dir / "phase5_validation.json", payload)

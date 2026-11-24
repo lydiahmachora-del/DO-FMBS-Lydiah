@@ -41,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clients", type=int, default=5)
     parser.add_argument("--fingerprint-identities", type=int, default=100)
     parser.add_argument("--fingerprint-impressions", type=int, default=8)
+    parser.add_argument("--face-min-faces-per-person", type=int, default=20)
+    parser.add_argument("--face-resize", type=float, default=0.4)
+    parser.add_argument("--face-test-fraction", type=float, default=0.15)
+    parser.add_argument("--face-calibration-fraction", type=float, default=0.15)
+    parser.add_argument("--fingerprint-train-impressions", type=int, default=5)
+    parser.add_argument("--fingerprint-calibration-impressions", type=int, default=1)
+    parser.add_argument("--split-seed", type=int, default=FACE_SPLIT_SEED)
+    parser.add_argument("--client-seed", type=int, default=CLIENT_PARTITION_SEED)
     return parser.parse_args()
 
 
@@ -58,10 +66,12 @@ def save_similarity_figure(path: Path, same: np.ndarray, different: np.ndarray) 
     plt.close(fig)
 
 
-def save_fingerprint_grids(output_root: Path, images: np.ndarray) -> None:
-    fig, axes = plt.subplots(4, 8, figsize=(12, 6.4))
-    for identity in range(4):
-        for impression in range(8):
+def save_fingerprint_grids(output_root: Path, images: np.ndarray, impressions_per_identity: int) -> None:
+    columns = min(8, impressions_per_identity)
+    rows = min(4, len(images) // impressions_per_identity)
+    fig, axes = plt.subplots(rows, columns, figsize=(max(8, columns * 1.5), max(4, rows * 1.6)), squeeze=False)
+    for identity in range(rows):
+        for impression in range(columns):
             ax = axes[identity, impression]
             ax.imshow(images[identity * 8 + impression], cmap="gray", vmin=0, vmax=255)
             ax.set_title(f"F{identity:03d}/I{impression}", fontsize=7)
@@ -71,10 +81,12 @@ def save_fingerprint_grids(output_root: Path, images: np.ndarray) -> None:
     fig.savefig(output_root / "fingerprint_same_identity_grid.png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
+    comparison_count = min(20, len(images) // impressions_per_identity)
     fig, axes = plt.subplots(4, 5, figsize=(8, 6.4))
     for index, ax in enumerate(axes.flat):
-        ax.imshow(images[index * 8], cmap="gray", vmin=0, vmax=255)
-        ax.set_title(f"Finger {index:03d}", fontsize=8)
+        if index < comparison_count:
+            ax.imshow(images[index * impressions_per_identity], cmap="gray", vmin=0, vmax=255)
+            ax.set_title(f"Finger {index:03d}", fontsize=8)
         ax.axis("off")
     fig.suptitle("Between-Identity Synthetic Fingerprint Comparison", fontsize=12)
     fig.tight_layout()
@@ -96,8 +108,12 @@ def save_face_grid(path: Path, images: np.ndarray, labels: np.ndarray, names: np
 
 def main() -> int:
     args = parse_args()
-    if args.fingerprint_identities != 100 or args.fingerprint_impressions != 8:
-        raise ValueError("The final study protocol requires exactly 100 identities and eight impressions")
+    if args.fingerprint_identities < args.clients or args.clients < 2:
+        raise ValueError("Fingerprint identities must be at least two and at least the number of clients")
+    if args.fingerprint_train_impressions + args.fingerprint_calibration_impressions >= args.fingerprint_impressions:
+        raise ValueError("Train and calibration impressions must leave at least one test impression")
+    if args.face_test_fraction + args.face_calibration_fraction >= 0.8:
+        raise ValueError("Face split fractions must leave at least 20% of samples for training")
     set_global_determinism()
     started = time.perf_counter()
     output = args.output_dir
@@ -108,11 +124,13 @@ def main() -> int:
 
     print("DO-FMBS Phase 1: leakage-free data preparation")
     print("[1/5] Loading public LFW face data")
-    lfw = fetch_lfw_people(min_faces_per_person=20, resize=0.4, color=False)
+    lfw = fetch_lfw_people(min_faces_per_person=args.face_min_faces_per_person,
+                           resize=args.face_resize, color=False)
     face_images = np.asarray(lfw.images, dtype=np.float32)
     face_labels = np.asarray(lfw.target, dtype=np.int64)
     face_train, face_cal, face_test = stratified_three_way_split(
-        face_labels, calibration_size=0.15, test_size=0.15, seed=FACE_SPLIT_SEED
+        face_labels, calibration_size=args.face_calibration_fraction,
+        test_size=args.face_test_fraction, seed=args.split_seed
     )
     validate_disjoint_splits(face_train, face_cal, face_test)
     face_flat = face_images.reshape(len(face_images), -1).astype(np.float64)
@@ -126,7 +144,7 @@ def main() -> int:
         train_indices=face_train, calibration_indices=face_cal, test_indices=face_test,
         n_classes=np.asarray([len(lfw.target_names)]), n_features=np.asarray([face_flat.shape[1]]),
         image_shape=np.asarray(face_images.shape[1:]), target_names=np.asarray(lfw.target_names),
-        scaler_fit_partition=np.asarray(["training"]), split_seed=np.asarray([FACE_SPLIT_SEED]),
+        scaler_fit_partition=np.asarray(["training"]), split_seed=np.asarray([args.split_seed]),
     )
     save_face_grid(figures / "face_training_samples.png", face_images[face_train], face_labels[face_train], lfw.target_names)
 
@@ -145,7 +163,7 @@ def main() -> int:
     )
     json_dump(output / "fingerprint_identity_templates.json", templates)
     save_similarity_figure(figures / "fingerprint_similarity_distributions.png", same_scores, different_scores)
-    save_fingerprint_grids(figures, finger_images)
+    save_fingerprint_grids(figures, finger_images, args.fingerprint_impressions)
     if not diagnostics["passed"]:
         raise RuntimeError(
             "Fingerprint identity-separability gate failed; training is scientifically invalid. "
@@ -153,7 +171,10 @@ def main() -> int:
         )
 
     print("[3/5] Creating fixed 5/1/2 fingerprint train/calibration/test split")
-    finger_train, finger_cal, finger_test = fingerprint_impression_split(impression_ids)
+    finger_train, finger_cal, finger_test = fingerprint_impression_split(
+        impression_ids, args.fingerprint_train_impressions,
+        args.fingerprint_calibration_impressions,
+    )
     validate_disjoint_splits(finger_train, finger_cal, finger_test)
     finger_flat = finger_images.reshape(len(finger_images), -1).astype(np.float64)
     finger_scaler, finger_scaled = fit_training_scaler(finger_flat, finger_train)
@@ -171,8 +192,8 @@ def main() -> int:
     )
 
     print("[4/5] Persisting the exact non-IID identity allocation used by Phase 2")
-    face_client_indices = non_iid_identity_partitions(face_labels[face_train], args.clients, CLIENT_PARTITION_SEED)
-    finger_client_indices = non_iid_identity_partitions(finger_labels[finger_train], args.clients, CLIENT_PARTITION_SEED + 1)
+    face_client_indices = non_iid_identity_partitions(face_labels[face_train], args.clients, args.client_seed)
+    finger_client_indices = non_iid_identity_partitions(finger_labels[finger_train], args.clients, args.client_seed + 1)
     client_rows = []
     for client_id, (fi, pi) in enumerate(zip(face_client_indices, finger_client_indices)):
         np.savez_compressed(
@@ -188,7 +209,7 @@ def main() -> int:
         })
     json_dump(output / "client_partition.json", {
         "strategy": "class-exclusive non-IID allocation; modality identity spaces partitioned independently",
-        "seed": CLIENT_PARTITION_SEED, "clients": client_rows,
+        "seed": args.client_seed, "clients": client_rows,
     })
     x = np.arange(args.clients)
     fig, ax = plt.subplots(figsize=(8.2, 4.8))
@@ -206,10 +227,20 @@ def main() -> int:
     metadata = {
         "phase": 1, "replay_id": os.environ.get("DO_FMBS_REPLAY_ID", "unspecified"),
         "created_utc": datetime.now(timezone.utc).isoformat(), "python": sys.version, "platform": platform.platform(),
-        "seeds": {"global": 42, "face_split": FACE_SPLIT_SEED,
+        "configuration": {"face_min_faces_per_person": args.face_min_faces_per_person,
+                           "face_resize": args.face_resize,
+                           "face_test_fraction": args.face_test_fraction,
+                           "face_calibration_fraction": args.face_calibration_fraction,
+                           "fingerprint_identities": args.fingerprint_identities,
+                           "fingerprint_impressions": args.fingerprint_impressions,
+                           "fingerprint_train_impressions": args.fingerprint_train_impressions,
+                           "fingerprint_calibration_impressions": args.fingerprint_calibration_impressions,
+                           "clients": args.clients, "split_seed": args.split_seed,
+                           "client_seed": args.client_seed},
+        "seeds": {"global": 42, "face_split": args.split_seed,
                   "fingerprint_identity_base": FINGERPRINT_IDENTITY_SEED,
                   "fingerprint_impression_base": FINGERPRINT_IMPRESSION_SEED,
-                  "client_partition": CLIENT_PARTITION_SEED},
+                  "client_partition": args.client_seed},
         "face": {"source": "Labeled Faces in the Wild via scikit-learn",
                  "identities": int(len(lfw.target_names)), "total": int(len(face_images)),
                  "train": int(len(face_train)), "calibration": int(len(face_cal)), "test": int(len(face_test)),
@@ -218,7 +249,7 @@ def main() -> int:
                         "identities": args.fingerprint_identities,
                         "impressions_per_identity": args.fingerprint_impressions, "total": int(len(finger_images)),
                         "train": int(len(finger_train)), "calibration": int(len(finger_cal)), "test": int(len(finger_test)),
-                        "split_protocol": "impressions 0-4 train, 5 calibration, 6-7 final test",
+                        "split_protocol": f"impressions 0-{args.fingerprint_train_impressions - 1} train, next {args.fingerprint_calibration_impressions} calibration, remainder test",
                         "scaler_fit": "training partition only", "quality_gate": diagnostics},
         "runtime_seconds": time.perf_counter() - started,
     }

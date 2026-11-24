@@ -546,11 +546,18 @@ def stratified_three_way_split(
 
 
 def fingerprint_impression_split(
-    impression_ids: np.ndarray,
+    impression_ids: np.ndarray, train_impressions: int = 5,
+    calibration_impressions: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    train = np.flatnonzero(np.isin(impression_ids, [0, 1, 2, 3, 4]))
-    calibration = np.flatnonzero(impression_ids == 5)
-    test = np.flatnonzero(np.isin(impression_ids, [6, 7]))
+    if train_impressions <= 0 or calibration_impressions <= 0:
+        raise ValueError("Training and calibration impression counts must be positive")
+    calibration_start = train_impressions
+    test_start = train_impressions + calibration_impressions
+    train = np.flatnonzero(impression_ids < calibration_start)
+    calibration = np.flatnonzero((impression_ids >= calibration_start) & (impression_ids < test_start))
+    test = np.flatnonzero(impression_ids >= test_start)
+    if not len(train) or not len(calibration) or not len(test):
+        raise ValueError("Impression counts must produce non-empty train, calibration and test partitions")
     return train, calibration, test
 
 
@@ -736,6 +743,7 @@ def verification_metrics(
     threshold: float,
     *,
     bootstrap_repetitions: int = 2000,
+    bootstrap_seed: int = BOOTSTRAP_SEED,
 ) -> dict[str, object]:
     genuine, impostor, _ = claimed_identity_scores(probabilities, labels)
     false_accepts = int(np.count_nonzero(impostor >= threshold))
@@ -761,7 +769,7 @@ def verification_metrics(
         "FAR_wilson_95": list(wilson_interval(false_accepts, len(impostor))),
         "FRR_wilson_95": list(wilson_interval(false_rejects, len(genuine))),
         "identity_cluster_bootstrap": identity_bootstrap_intervals(
-            probabilities, labels, threshold, bootstrap_repetitions
+            probabilities, labels, threshold, bootstrap_repetitions, bootstrap_seed
         ),
         "ROC_AUC": float(roc_auc_score(truth, scores)),
         "EER": float((fpr[eer_index] + fnr[eer_index]) / 2.0),

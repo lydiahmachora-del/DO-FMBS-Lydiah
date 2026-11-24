@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=12)
     parser.add_argument("--local-epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-dir", type=Path, default=Path("do_fmbs_data"))
     return parser.parse_args()
 
@@ -49,8 +51,9 @@ def balanced_batch_records(client: dict[str, np.ndarray], seed: int) -> tuple[np
 
 
 def federated_train(model_factory, clients: list[dict[str, np.ndarray]], rounds: int,
-                    local_epochs: int, batch_size: int) -> tuple[object, dict[str, list[float]]]:
-    global_model = compile_dual_branch_model(model_factory())
+                    local_epochs: int, batch_size: int, learning_rate: float = 0.001,
+                    seed: int = 42) -> tuple[object, dict[str, list[float]]]:
+    global_model = compile_dual_branch_model(model_factory(), learning_rate=learning_rate)
     history = {"round": [], "face_accuracy": [], "fingerprint_accuracy": [],
                "face_loss": [], "fingerprint_loss": [], "total_loss": []}
     total_face = sum(len(client["face_y"]) for client in clients)
@@ -59,10 +62,10 @@ def federated_train(model_factory, clients: list[dict[str, np.ndarray]], rounds:
     for round_index in range(rounds):
         updates = []
         for client_id, client in enumerate(clients):
-            local = compile_dual_branch_model(model_factory())
+            local = compile_dual_branch_model(model_factory(), learning_rate=learning_rate)
             local.set_weights(global_model.get_weights())
             face_x, face_y, finger_x, finger_y = balanced_batch_records(
-                client, 100_000 + round_index * 100 + client_id
+                100_000 + (seed - 42) + round_index * 100 + client_id
             )
             fitted = local.fit(
                 {"face_input": face_x, "finger_input": finger_x},
@@ -99,9 +102,9 @@ def federated_train(model_factory, clients: list[dict[str, np.ndarray]], rounds:
 
 def main() -> int:
     args = parse_args()
-    if min(args.rounds, args.local_epochs, args.batch_size) <= 0:
-        raise ValueError("Rounds, local epochs and batch size must be positive")
-    set_global_determinism()
+    if min(args.rounds, args.local_epochs, args.batch_size, args.learning_rate) <= 0:
+        raise ValueError("Rounds, local epochs, batch size and learning rate must be positive")
+    set_global_determinism(args.seed)
     started = time.perf_counter()
     data_dir = args.data_dir
     with np.load(data_dir / "face_data.npz", allow_pickle=False) as face:
@@ -116,14 +119,15 @@ def main() -> int:
     for row in partition["clients"]:
         with np.load(data_dir / "clients" / f"client_{row['client_id']}.npz", allow_pickle=False) as data:
             clients.append({name: data[name] for name in data.files})
-    if len(clients) != 5:
-        raise RuntimeError(f"Expected five persisted non-IID clients, found {len(clients)}")
+    if len(clients) < 2:
+        raise RuntimeError(f"At least two persisted federated clients are required, found {len(clients)}")
 
     factory = lambda: create_dual_branch_model(
         face_features, finger_features, face_classes, finger_classes
     )
     model, history = federated_train(
-        factory, clients, args.rounds, args.local_epochs, args.batch_size
+        factory, clients, args.rounds, args.local_epochs, args.batch_size,
+        args.learning_rate, args.seed,
     )
 
     face_prob = modality_probabilities(model, "face", face_test)
@@ -139,7 +143,8 @@ def main() -> int:
         "federated_partition": partition["strategy"],
         "clients": len(clients),
         "training_parameters": {"rounds": args.rounds, "local_epochs": args.local_epochs,
-                                "batch_size": args.batch_size, "learning_rate": 0.001,
+                                "batch_size": args.batch_size, "learning_rate": args.learning_rate,
+                                "seed": args.seed,
                                 "loss_weights": {"face": 0.5, "fingerprint": 0.5}},
         "face_classification": {
             "samples": int(len(face_test_y)), "classes": face_classes,
