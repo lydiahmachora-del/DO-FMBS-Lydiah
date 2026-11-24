@@ -394,9 +394,18 @@ def start_new_replay() -> Path:
     ACTIVE_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
     ACTIVE_RUN_PATH.write_text(run_dir.name, encoding="utf-8")
     st.session_state["active_run_dir"] = str(run_dir)
-    st.session_state["selected_page"] = SIMULATION_PAGE
-    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
+    st.session_state["pending_page_navigation"] = {
+        "selected_page": SIMULATION_PAGE,
+        "diagnostic_page": DIAGNOSTIC_OPTIONS[0],
+    }
     return run_dir
+
+
+def queue_page_navigation(selected_page: str, diagnostic_page: str = DIAGNOSTIC_OPTIONS[0]) -> None:
+    st.session_state["pending_page_navigation"] = {
+        "selected_page": selected_page,
+        "diagnostic_page": diagnostic_page,
+    }
 
 
 def read_run_configuration(run_dir: Path | None) -> dict[str, dict]:
@@ -526,12 +535,12 @@ def phase_configuration_dialog(phase_number: int | None) -> None:
         run_dir = Path(raw_run_dir) if raw_run_dir else start_new_replay()
     save_run_configuration(run_dir, configurations)
     st.session_state.pop("pending_phase_configuration", None)
-    st.session_state["selected_page"] = SIMULATION_PAGE
-    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
-    if all_phases:
-        run_all_phases(configurations, run_dir=run_dir)
-    else:
-        execute_phase(int(phase_number), run_dir)
+    queue_page_navigation(SIMULATION_PAGE)
+    st.session_state["pending_phase_execution"] = {
+        "phase": None if all_phases else int(phase_number),
+        "run_dir": str(run_dir),
+    }
+    st.rerun()
 
 
 def clear_diagnostic_page() -> None:
@@ -549,8 +558,7 @@ def execute_phase(phase_number: int, run_dir: Path, rerun_after: bool = True) ->
     ]
     if not run_streamed(command, f"Phase {phase_number}: {PHASES[phase_number - 1]['name']}"):
         return False
-    st.session_state["selected_page"] = SIMULATION_PAGE
-    st.session_state["diagnostic_page"] = PHASES[phase_number - 1]["page"]
+    queue_page_navigation(SIMULATION_PAGE, PHASES[phase_number - 1]["page"])
     if phase_number == 6:
         return finalize_replay(run_dir, rerun_after=rerun_after)
     if rerun_after:
@@ -559,8 +567,7 @@ def execute_phase(phase_number: int, run_dir: Path, rerun_after: bool = True) ->
 
 
 def view_phase_results(phase_number: int) -> None:
-    st.session_state["selected_page"] = SIMULATION_PAGE
-    st.session_state["diagnostic_page"] = PHASES[phase_number - 1]["page"]
+    queue_page_navigation(SIMULATION_PAGE, PHASES[phase_number - 1]["page"])
 
 
 def start_and_run_phase_one() -> None:
@@ -569,8 +576,7 @@ def start_and_run_phase_one() -> None:
 
 
 def return_to_simulation() -> None:
-    st.session_state["selected_page"] = SIMULATION_PAGE
-    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
+    queue_page_navigation(SIMULATION_PAGE)
 
 
 def run_all_phases(configurations: dict[str, dict] | None = None,
@@ -1559,6 +1565,10 @@ manifest, manifest_path = current_manifest()
 run_dir = selected_run_dir()
 records, _registry_path = registry_for(run_dir, manifest)
 done = completed_phases(records)
+pending_navigation = st.session_state.pop("pending_page_navigation", None)
+if pending_navigation:
+    st.session_state["selected_page"] = pending_navigation["selected_page"]
+    st.session_state["diagnostic_page"] = pending_navigation["diagnostic_page"]
 
 with st.sidebar:
     if st.session_state.get("selected_page") not in PAGE_OPTIONS:
@@ -1614,3 +1624,15 @@ else:
 pending_configuration = st.session_state.get("pending_phase_configuration")
 if pending_configuration is not None:
     phase_configuration_dialog(None if pending_configuration == "all" else int(pending_configuration))
+
+pending_execution = st.session_state.pop("pending_phase_execution", None)
+if pending_execution:
+    execution_run_dir = Path(pending_execution["run_dir"])
+    execution_phase = pending_execution["phase"]
+    if execution_phase is None:
+        st.info(f"Submitted configuration for all six phases · run `{execution_run_dir.name}`. Execution is starting below.")
+        run_all_phases(read_run_configuration(execution_run_dir), run_dir=execution_run_dir)
+    else:
+        phase_name = PHASES[int(execution_phase) - 1]["name"]
+        st.info(f"Submitted configuration for Phase {execution_phase} · {phase_name} · run `{execution_run_dir.name}`. Execution is starting below.")
+        execute_phase(int(execution_phase), execution_run_dir)
