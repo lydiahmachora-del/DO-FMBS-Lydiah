@@ -1356,6 +1356,78 @@ def render_phase3_outputs(run_dir: Path) -> None:
             st.json(results, expanded=False)
 
 
+def render_phase4_outputs(run_dir: Path) -> None:
+    """Show the completed Phase 4 comparison figure, metrics, and saved artifacts."""
+    data_dir = run_dir / "do_fmbs_data"
+    results_path = data_dir / "phase4_defense_results.json"
+    results = load_json(results_path) or {}
+    st.subheader("Phase 4 defense results")
+    st.caption(results.get("privacy_terminology", "Defense outcomes are shown separately for face and fingerprint modalities."))
+
+    figure_path = data_dir / "figures" / "defense_comparison.png"
+    if figure_path.is_file():
+        st.image(str(figure_path), caption="Defense comparison across modality metrics",
+                 use_container_width=True)
+    else:
+        st.info("The Phase 4 defense-comparison image was not produced for this run.")
+
+    comparison = results.get("comparison", {})
+    if comparison:
+        rows = []
+        for name, values in comparison.items():
+            face = values.get("face_classification", {})
+            fingerprint = values.get("fingerprint_classification", {})
+            fgsm = values.get("face_fgsm", {})
+            rows.append({
+                "Model / defense": name.replace("_", " ").title(),
+                "Face accuracy": percent(face.get("accuracy", 0)),
+                "Face loss": f"{float(face.get('loss', 0)):.4f}",
+                "Fingerprint accuracy": percent(fingerprint.get("accuracy", 0)),
+                "Fingerprint loss": f"{float(fingerprint.get('loss', 0)):.4f}",
+                "Face FGSM success rate": percent(fgsm.get("attack_success_rate", 0)),
+                "Eligible clean face samples": fgsm.get("eligible_clean_correct", 0),
+            })
+        st.markdown("#### Baseline and defense metrics")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    gradient_norms = results.get("fingerprint_gradient_norms", {})
+    if gradient_norms:
+        with st.expander("Fingerprint-branch gradient checks", expanded=False):
+            st.dataframe(pd.DataFrame([
+                {"Fingerprint parameter": name, "Gradient norm": f"{float(value):.8g}"}
+                for name, value in gradient_norms.items()
+            ]), use_container_width=True, hide_index=True)
+
+    artifact_paths = (
+        results_path,
+        data_dir / "final_results.pkl",
+        data_dir / "do_fmbs_model.keras",
+        figure_path,
+    )
+    st.markdown("#### Files produced by Phase 4")
+    available = [path for path in artifact_paths if path.is_file()]
+    if not available:
+        st.info("No Phase 4 result files were found in this run.")
+        return
+    st.dataframe(pd.DataFrame([
+        {"File": path.relative_to(run_dir).as_posix(), "Size": f"{path.stat().st_size:,} bytes",
+         "Type": "Image" if path.suffix.lower() == ".png" else "JSON results" if path.suffix.lower() == ".json"
+         else "Keras model" if path.suffix.lower() == ".keras" else "Pickle results"}
+        for path in available
+    ]), use_container_width=True, hide_index=True)
+    for path in available:
+        mime = ("image/png" if path.suffix.lower() == ".png" else
+                "application/json" if path.suffix.lower() == ".json" else
+                "application/octet-stream")
+        st.download_button(
+            f"Download {path.name}", data=path.read_bytes(), file_name=path.name, mime=mime,
+            key=f"download_phase4_{path.name}",
+        )
+    if results:
+        with st.expander("Complete saved Phase 4 JSON results", expanded=False):
+            st.json(results, expanded=False)
+
+
 def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                       records: list[dict], completed: set[int]) -> None:
     st.button("Back to Simulation", key=f"back_to_simulation_{phase['number']}",
@@ -1431,11 +1503,14 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     if done and number == 3 and run_dir:
         st.divider()
         render_phase3_outputs(run_dir)
+    if done and number == 4 and run_dir:
+        st.divider()
+        render_phase4_outputs(run_dir)
 
     if done and manifest:
         st.divider()
         render_phase_result(number, manifest, run_dir)
-    elif done and run_dir and number != 3:
+    elif done and run_dir and number not in {3, 4}:
         st.divider()
         st.subheader("Phase output")
         output_names = {
