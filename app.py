@@ -388,7 +388,7 @@ def clear_diagnostic_page() -> None:
     st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
 
 
-def execute_phase(phase_number: int, run_dir: Path) -> bool:
+def execute_phase(phase_number: int, run_dir: Path, rerun_after: bool = True) -> bool:
     command = [
         sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
         "--start-phase", str(phase_number), "--end-phase", str(phase_number), "--resume",
@@ -398,8 +398,9 @@ def execute_phase(phase_number: int, run_dir: Path) -> bool:
     st.session_state["selected_page"] = SIMULATION_PAGE
     st.session_state["diagnostic_page"] = PHASES[phase_number - 1]["page"]
     if phase_number == 6:
-        return finalize_replay(run_dir)
-    st.rerun()
+        return finalize_replay(run_dir, rerun_after=rerun_after)
+    if rerun_after:
+        st.rerun()
     return True
 
 
@@ -410,7 +411,7 @@ def view_phase_results(phase_number: int) -> None:
 
 def start_and_run_phase_one() -> None:
     run_dir = start_new_replay()
-    execute_phase(1, run_dir)
+    execute_phase(1, run_dir, rerun_after=False)
 
 
 def return_to_simulation() -> None:
@@ -441,9 +442,7 @@ def run_all_phases() -> None:
     if run_streamed(command, "Six-phase simulation", phase_progress=show_phase_progress):
         progress.progress(1.0, text="Six phases complete · publishing evidence")
         stage.success("All six phases completed. Finalizing this isolated run.")
-        finalize_replay(run_dir)
-    else:
-        st.rerun()
+        finalize_replay(run_dir, rerun_after=False)
 
 
 def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: dict | None) -> None:
@@ -494,7 +493,7 @@ def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: 
                               on_click=view_phase_results, args=(number,), use_container_width=True)
             elif run_dir and prerequisite_met:
                 column.button(f"Run Phase {number}", key=f"run_phase_{number}",
-                              on_click=execute_phase, args=(number, run_dir), type="primary",
+                              on_click=execute_phase, args=(number, run_dir, False), type="primary",
                               use_container_width=True)
             elif not run_dir and number == 1:
                 column.button("Start run · Phase 1", key="run_phase_1_empty", type="primary",
@@ -508,7 +507,7 @@ def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: 
         st.success("This interactive run is complete. Use the View Results buttons above to inspect its saved phase outputs; Cross-Phase Analysis presents the accepted research runs.")
 
 
-def finalize_replay(run_dir: Path) -> bool:
+def finalize_replay(run_dir: Path, rerun_after: bool = True) -> bool:
     if not run_streamed(
         [sys.executable, "-u", str(AUDITOR), "--run-dir", str(run_dir)],
         "Independent replay audit",
@@ -521,7 +520,8 @@ def finalize_replay(run_dir: Path) -> bool:
     ):
         return False
     st.success("All six phases completed. Independent audit passed and the replay manifest is ready.")
-    st.rerun()
+    if rerun_after:
+        st.rerun()
     return True
 
 
