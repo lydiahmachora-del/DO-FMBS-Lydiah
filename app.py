@@ -123,6 +123,14 @@ st.markdown("""
     [data-testid="stDialog"] [role="dialog"] > div { min-width:0; }
     [data-testid="stDialog"] [data-testid="stExpander"] { margin:.2rem 0; }
     [data-testid="stDialog"] [data-testid="stCaptionContainer"] p { margin-bottom:.15rem; }
+    [data-testid="stDialog"] .st-key-phase_configuration_footer {
+        position:sticky; bottom:0; z-index:20; padding:.65rem .25rem .25rem;
+        margin-top:.35rem; background:var(--background-color, #ffffff);
+        border-top:1px solid var(--line, #dce5ea);
+    }
+    [data-testid="stDialog"] .st-key-phase_configuration_footer button {
+        min-height:2.65rem; white-space:normal;
+    }
     @media (max-height: 760px) {
         [data-testid="stDialog"] [role="dialog"] { max-height:82vh !important; }
     }
@@ -501,15 +509,15 @@ def phase_configuration_dialog(phase_number: int | None) -> None:
             except (TypeError, ValueError) as error:
                 st.error(f"Configuration validation: {error}")
 
-    controls = st.columns(3)
-    if controls[0].button("Reset to research defaults", key="reset_phase_config",
-                          on_click=request_configuration_reset, args=(phase_number,)):
-        pass
-    if controls[1].button("Cancel", key="cancel_phase_config"):
-        st.session_state.pop("pending_phase_configuration", None)
-        st.rerun()
-    submit_label = "Configure and Run All Phases" if all_phases else f"Run Phase {phase_number}"
-    submitted = controls[2].button(submit_label, type="primary", key="submit_phase_config")
+    with st.container(key="phase_configuration_footer"):
+        controls = st.columns(3)
+        controls[0].button("Reset to research defaults", key="reset_phase_config",
+                           on_click=request_configuration_reset, args=(phase_number,))
+        if controls[1].button("Cancel", key="cancel_phase_config"):
+            st.session_state.pop("pending_phase_configuration", None)
+            st.rerun()
+        submit_label = "Configure and Run All Phases" if all_phases else f"Run Phase {phase_number}"
+        submitted = controls[2].button(submit_label, type="primary", key="submit_phase_config")
     if not submitted:
         return
     try:
