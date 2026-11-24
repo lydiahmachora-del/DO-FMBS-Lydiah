@@ -1428,6 +1428,108 @@ def render_phase4_outputs(run_dir: Path) -> None:
             st.json(results, expanded=False)
 
 
+def render_phase5_outputs(run_dir: Path) -> None:
+    """Display Phase 5 validation figures, key metrics, and its saved artifacts."""
+    results_path = run_dir / "do_fmbs_data" / "phase5_validation.json"
+    results = load_json(results_path) or {}
+    st.subheader("Phase 5 validation results")
+    st.caption(results.get("identity_space_statement", "Classification and verification are reported separately by modality."))
+
+    rows = []
+    for modality in ("face", "fingerprint"):
+        block = results.get(modality, {})
+        classification = block.get("classification", {})
+        baseline = classification.get("baseline_comparison", {})
+        verification = block.get("verification", {}).get("final_test", {})
+        if classification or verification:
+            rows.append({
+                "Modality": modality.title(),
+                "Final accuracy": percent(classification.get("accuracy", 0)),
+                "Baseline accuracy": percent(baseline.get("accuracy", 0)),
+                "Macro F1": f"{float(classification.get('macro_f1', 0)):.3f}",
+                "Test samples": classification.get("samples", 0),
+                "Verification FAR": percent(verification.get("FAR", 0)),
+                "Verification FRR": percent(verification.get("FRR", 0)),
+                "Verification ROC AUC": f"{float(verification.get('ROC_AUC', 0)):.3f}",
+                "Frozen threshold": f"{float(verification.get('threshold', 0)):.5f}",
+            })
+    if rows:
+        st.markdown("#### Classification and claimed-identity verification")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    statistical = results.get("statistical_validation", [])
+    if statistical:
+        with st.expander("Paired statistical comparisons", expanded=False):
+            st.dataframe(pd.DataFrame([{
+                "Modality": row.get("modality", "").title(),
+                "Test": row.get("test"),
+                "Baseline-only correct": row.get("baseline_only_correct"),
+                "Final-only correct": row.get("final_only_correct"),
+                "Discordant pairs": row.get("discordant"),
+                "p-value": f"{float(row.get('p_value', 0)):.5g}",
+                "Significant at 0.05": row.get("significant_at_0_05"),
+            } for row in statistical]), use_container_width=True, hide_index=True)
+
+    robustness = results.get("robustness", {})
+    robustness_rows = []
+    for model_name in ("baseline", "do_fmbs"):
+        for item in robustness.get(model_name, []):
+            robustness_rows.append({
+                "Model": model_name.replace("_", " ").title(),
+                "Modality": item.get("modality", "face").title(),
+                "FGSM epsilon": item.get("epsilon"),
+                "Accuracy under attack": percent(item.get("accuracy_all_samples", 0)),
+                "Attack success rate": percent(item.get("attack_success_rate", 0)),
+                "Successful / eligible": f"{item.get('successful_attacks', 0)}/{item.get('eligible_clean_correct', 0)}",
+            })
+    if robustness_rows:
+        with st.expander("Face-branch robustness values", expanded=False):
+            st.dataframe(pd.DataFrame(robustness_rows), use_container_width=True, hide_index=True)
+
+    artifacts = []
+    for raw_path in [*results.get("artifacts", []), "do_fmbs_data/phase5_validation.json"]:
+        candidate = (run_dir / str(raw_path).replace("\\", "/")).resolve()
+        try:
+            candidate.relative_to(run_dir.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file() and candidate not in artifacts:
+            artifacts.append(candidate)
+
+    images = [path for path in artifacts if path.suffix.lower() == ".png"]
+    st.markdown("#### Generated validation images")
+    if images:
+        for offset in range(0, len(images), 3):
+            image_columns = st.columns(min(3, len(images) - offset))
+            for column, path in zip(image_columns, images[offset:offset + 3]):
+                column.image(str(path), caption=path.stem.replace("_", " ").title(),
+                             use_container_width=True)
+    else:
+        st.info("No Phase 5 validation figures were found for this run.")
+
+    st.markdown("#### Files produced by Phase 5")
+    if not artifacts:
+        st.info("No Phase 5 output files were found in this run.")
+        return
+    st.dataframe(pd.DataFrame([
+        {"File": path.relative_to(run_dir).as_posix(), "Size": f"{path.stat().st_size:,} bytes",
+         "Type": "Image" if path.suffix.lower() == ".png" else path.suffix.lstrip(".").upper()}
+        for path in artifacts
+    ]), use_container_width=True, hide_index=True)
+    with st.expander("Download Phase 5 output files", expanded=False):
+        for offset in range(0, len(artifacts), 3):
+            download_columns = st.columns(min(3, len(artifacts) - offset))
+            for column, path in zip(download_columns, artifacts[offset:offset + 3]):
+                mime = "image/png" if path.suffix.lower() == ".png" else "application/octet-stream"
+                column.download_button(
+                    f"Download {path.name}", data=path.read_bytes(), file_name=path.name,
+                    mime=mime, key=f"download_phase5_{path.relative_to(run_dir).as_posix()}",
+                    use_container_width=True,
+                )
+    with st.expander("Complete saved Phase 5 JSON results", expanded=False):
+        st.json(results, expanded=False)
+
+
 def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                       records: list[dict], completed: set[int]) -> None:
     st.button("Back to Simulation", key=f"back_to_simulation_{phase['number']}",
@@ -1506,11 +1608,14 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     if done and number == 4 and run_dir:
         st.divider()
         render_phase4_outputs(run_dir)
+    if done and number == 5 and run_dir:
+        st.divider()
+        render_phase5_outputs(run_dir)
 
     if done and manifest:
         st.divider()
         render_phase_result(number, manifest, run_dir)
-    elif done and run_dir and number not in {3, 4}:
+    elif done and run_dir and number not in {3, 4, 5}:
         st.divider()
         st.subheader("Phase output")
         output_names = {
