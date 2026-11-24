@@ -65,7 +65,8 @@ def federated_train(model_factory, clients: list[dict[str, np.ndarray]], rounds:
             local = compile_dual_branch_model(model_factory(), learning_rate=learning_rate)
             local.set_weights(global_model.get_weights())
             face_x, face_y, finger_x, finger_y = balanced_batch_records(
-                100_000 + (seed - 42) + round_index * 100 + client_id
+                client,
+                100_000 + (seed - 42) + round_index * 100 + client_id,
             )
             fitted = local.fit(
                 {"face_input": face_x, "finger_input": finger_x},
