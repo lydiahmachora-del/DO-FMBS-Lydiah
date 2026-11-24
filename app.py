@@ -34,6 +34,7 @@ AUDITOR = ROOT / "scripts" / "verify_replay_evidence.py"
 MANIFEST_BUILDER = ROOT / "scripts" / "build_final_evidence_manifest.py"
 RUN_ROOT = ROOT / "runtime_recording"
 ACTIVE_RUN_PATH = RUN_ROOT / ".active_interactive_run"
+ACTIVE_EXECUTION_KEY = "active_interactive_execution"
 
 PHASES = [
     {
@@ -391,6 +392,78 @@ def run_streamed(command: list[str], title: str, phase_progress=None) -> bool:
     return False
 
 
+def launch_interactive_execution(run_dir: Path, phase_number: int | None) -> None:
+    config_path = run_dir / "run_config.json"
+    if phase_number is None:
+        start_phase, end_phase = 1, 6
+        title = "All six phases"
+    else:
+        start_phase = end_phase = int(phase_number)
+        title = f"Phase {phase_number} · {PHASES[phase_number - 1]['name']}"
+    command = [sys.executable, "-u", str(RUNNER), "--run-dir", str(run_dir),
+               "--start-phase", str(start_phase), "--end-phase", str(end_phase),
+               "--resume", "--config-file", str(config_path)]
+    log_path = RUN_ROOT / f".{run_dir.name}_execution.log"
+    environment = os.environ.copy()
+    environment.update({"PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"})
+    try:
+        with log_path.open("w", encoding="utf-8", errors="replace") as stream:
+            process = subprocess.Popen(command, cwd=ROOT, env=environment,
+                                       stdout=stream, stderr=subprocess.STDOUT, text=True)
+        st.session_state[ACTIVE_EXECUTION_KEY] = {
+            "run_dir": str(run_dir), "phase": phase_number, "title": title,
+            "log_path": str(log_path), "process": process, "error": None,
+        }
+    except OSError as error:
+        st.session_state[ACTIVE_EXECUTION_KEY] = {
+            "run_dir": str(run_dir), "phase": phase_number, "title": title,
+            "log_path": str(log_path), "process": None, "error": str(error),
+        }
+
+
+@st.fragment(run_every="1s")
+def render_interactive_execution_log(run_dir: Path, phase_number: int | None) -> None:
+    execution = st.session_state.get(ACTIVE_EXECUTION_KEY)
+    if not execution or execution.get("run_dir") != str(run_dir):
+        return
+    if phase_number is not None and execution.get("phase") != phase_number:
+        return
+    if phase_number is None and execution.get("phase") is not None:
+        return
+
+    if execution.get("error"):
+        st.error(f"Could not start {execution['title']}: {execution['error']}")
+        return
+    process = execution.get("process")
+    if process is None:
+        st.error("The execution process is unavailable. Start this phase again from its configuration dialog.")
+        return
+
+    exit_code = process.poll()
+    running = exit_code is None
+    label = f"Running · {execution['title']}" if running else (
+        f"Completed · {execution['title']}" if exit_code == 0 else f"Failed · {execution['title']}")
+    with st.status(label, state="running" if running else ("complete" if exit_code == 0 else "error"),
+                   expanded=True):
+        log_path = Path(execution["log_path"])
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        with st.expander("Technical execution log", expanded=True):
+            st.caption("Live output from the submitted configuration." if running else "Final orchestration output.")
+            st.code("\n".join(lines[-100:]) if lines else "Starting phase runner…", language="text")
+        if running:
+            st.caption("Execution is continuing in the background; this page refreshes the log automatically.")
+            return
+
+    st.session_state.pop(ACTIVE_EXECUTION_KEY, None)
+    destination = (SIMULATION_PAGE, DIAGNOSTIC_OPTIONS[0]) if phase_number is None else (
+        SIMULATION_PAGE, PHASES[phase_number - 1]["page"])
+    queue_page_navigation(*destination)
+    st.rerun(scope="app")
+
+
 def start_new_replay() -> Path:
     stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
     run_dir = RUN_ROOT / f"interactive_replay_{stamp}"
@@ -543,12 +616,15 @@ def phase_configuration_dialog(phase_number: int | None) -> None:
         run_dir = Path(raw_run_dir) if raw_run_dir else start_new_replay()
     save_run_configuration(run_dir, configurations)
     st.session_state.pop("pending_phase_configuration", None)
-    queue_page_navigation(SIMULATION_PAGE)
+    queue_page_navigation(
+        SIMULATION_PAGE if all_phases else PHASES[int(phase_number) - 1]["page"],
+        DIAGNOSTIC_OPTIONS[0] if all_phases else PHASES[int(phase_number) - 1]["page"],
+    )
     st.session_state["pending_phase_execution"] = {
         "phase": None if all_phases else int(phase_number),
         "run_dir": str(run_dir),
     }
-    st.rerun()
+    st.rerun(scope="app")
 
 
 def clear_diagnostic_page() -> None:
@@ -707,6 +783,9 @@ def render_run_comparison() -> None:
 def render_simulation_page(records: list[dict], run_dir: Path | None, manifest: dict | None) -> None:
     st.title("Simulation")
     st.caption("Run all six phases in a new isolated run, or continue one phase at a time with its prerequisites enforced.")
+    active_execution = st.session_state.get(ACTIVE_EXECUTION_KEY, {})
+    if run_dir and active_execution.get("phase") is None:
+        render_interactive_execution_log(run_dir, None)
     if run_dir:
         st.info(f"Current run: `{run_dir.name}`. A new full run creates a different run ID and leaves this run and all accepted results intact.")
         st.button("Run All Phases · New Run", type="primary", key="run_all_phases",
@@ -1149,6 +1228,134 @@ def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | 
                                                         "diagnostic_page": DIAGNOSTIC_OPTIONS[0]})))
 
 
+def render_phase1_generated_images(run_dir: Path) -> None:
+    """Show persisted image samples produced by this run's Phase 1 preparation."""
+    data_dir = run_dir / "do_fmbs_data"
+    st.subheader("Generated face and fingerprint images")
+    st.caption("Samples below are loaded from this run's saved Phase 1 training partitions.")
+    modality_columns = st.columns(2)
+    sources = (
+        ("Face images", "face_data.npz", "Face"),
+        ("Synthetic fingerprint images", "fingerprint_data.npz", "Fingerprint identity"),
+    )
+
+    for column, (title, filename, caption_prefix) in zip(modality_columns, sources):
+        archive_path = data_dir / filename
+        with column:
+            st.markdown(f"#### {title}")
+            if not archive_path.is_file():
+                st.info(f"Saved {title.lower()} are not available in this run yet.")
+                continue
+            try:
+                with np.load(archive_path, allow_pickle=False) as archive:
+                    images = archive["images_train"]
+                    labels = archive["y_train"]
+                    target_names = archive["target_names"] if "target_names" in archive.files else None
+                    count = min(6, len(images), len(labels))
+                    if count == 0:
+                        st.info(f"No saved {title.lower()} are available to preview.")
+                        continue
+                    for offset in range(0, count, 2):
+                        sample_columns = st.columns(min(2, count - offset))
+                        for sample_column, sample_index in zip(
+                            sample_columns, range(offset, min(offset + 2, count))
+                        ):
+                            label = int(labels[sample_index])
+                            if target_names is not None and 0 <= label < len(target_names):
+                                identity = str(target_names[label])
+                            else:
+                                identity = str(label)
+                            sample_column.image(
+                                images[sample_index],
+                                caption=f"{caption_prefix}: {identity}",
+                                clamp=True,
+                                use_container_width=True,
+                            )
+                    st.caption(f"Showing {count} of {len(images):,} saved training images.")
+            except (OSError, ValueError, KeyError, IndexError) as error:
+                st.warning(f"Could not load the saved {title.lower()}: {error}")
+
+
+def render_phase3_outputs(run_dir: Path) -> None:
+    """Render the interactive Phase 3 results and provide its persisted files."""
+    data_dir = run_dir / "do_fmbs_data"
+    results_path = data_dir / "phase3_attack_results.json"
+    results = load_json(results_path) or {}
+    st.subheader("Phase 3 attack results")
+    st.caption("FGSM and PGD perturb the face branch only; the fingerprint input is held unchanged.")
+
+    figure_path = data_dir / "figures" / "face_adversarial_attacks.png"
+    if figure_path.is_file():
+        st.image(str(figure_path), caption="Face-branch adversarial evasion attack success rate",
+                 use_container_width=True)
+    else:
+        st.info("The Phase 3 evasion figure was not produced for this run.")
+
+    evasion = results.get("evasion", [])
+    if evasion:
+        st.markdown("#### Face evasion by attack and perturbation bound")
+        evasion_rows = [{
+            "Attack": row.get("attack"),
+            "Epsilon": row.get("epsilon"),
+            "Successful attacks": f"{row.get('successful_attacks', 0)}/{row.get('clean_correct', 0)}",
+            "Attack success rate": percent(row.get("attack_success_rate", 0)),
+            "Accuracy under attack": percent(row.get("attacked_accuracy_all_samples", 0)),
+            "Maximum |perturbation|": f"{float(row.get('max_abs_perturbation', 0)):.5f}",
+            "Within epsilon": row.get("perturbation_within_epsilon"),
+        } for row in evasion]
+        st.dataframe(pd.DataFrame(evasion_rows), use_container_width=True, hide_index=True)
+
+    membership = results.get("membership_inference", {})
+    poisoning = results.get("label_flipping_poisoning", {})
+    summary_rows = []
+    if membership:
+        summary_rows.append({
+            "Experiment": "Face membership inference",
+            "Main result": f"{percent(membership.get('attack_accuracy', 0))} attack accuracy; "
+                           f"ROC AUC {float(membership.get('ROC_AUC', 0)):.3f}",
+            "Details": f"{membership.get('members', 0)} members / {membership.get('nonmembers', 0)} nonmembers; "
+                       f"threshold {float(membership.get('selected_threshold', 0)):.4f}",
+        })
+    if poisoning:
+        summary_rows.append({
+            "Experiment": "Label-flipping poisoning",
+            "Main result": f"Face accuracy {percent(poisoning.get('face_accuracy_before', 0))} → "
+                           f"{percent(poisoning.get('face_accuracy_after', 0))}",
+            "Details": f"{poisoning.get('poisoned_synchronized_records', 0)} records poisoned at "
+                       f"{percent(poisoning.get('poison_rate', 0))}; "
+                       f"fingerprint accuracy {percent(poisoning.get('fingerprint_accuracy_before', 0))} → "
+                       f"{percent(poisoning.get('fingerprint_accuracy_after', 0))}",
+        })
+    if summary_rows:
+        st.markdown("#### Other Phase 3 experiments")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    artifact_paths = (
+        results_path,
+        data_dir / "attack_results.pkl",
+        figure_path,
+    )
+    st.markdown("#### Files produced by Phase 3")
+    available = [path for path in artifact_paths if path.is_file()]
+    if not available:
+        st.info("No Phase 3 result files were found in this run.")
+        return
+    st.dataframe(pd.DataFrame([
+        {"File": path.relative_to(run_dir).as_posix(), "Size": f"{path.stat().st_size:,} bytes",
+         "Type": "Image" if path.suffix.lower() == ".png" else "JSON results" if path.suffix.lower() == ".json" else "Pickle results"}
+        for path in available
+    ]), use_container_width=True, hide_index=True)
+    for path in available:
+        mime = "image/png" if path.suffix.lower() == ".png" else "application/json" if path.suffix.lower() == ".json" else "application/octet-stream"
+        st.download_button(
+            f"Download {path.name}", data=path.read_bytes(), file_name=path.name, mime=mime,
+            key=f"download_phase3_{path.name}",
+        )
+    if results:
+        with st.expander("Complete saved Phase 3 JSON results", expanded=False):
+            st.json(results, expanded=False)
+
+
 def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                       records: list[dict], completed: set[int]) -> None:
     st.button("Back to Simulation", key=f"back_to_simulation_{phase['number']}",
@@ -1159,6 +1366,9 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     st.markdown(f'<div class="eyebrow">Phase {number} of 6</div>', unsafe_allow_html=True)
     st.title(phase["name"])
     st.write(phase["purpose"])
+    active_execution = st.session_state.get(ACTIVE_EXECUTION_KEY, {})
+    if run_dir and active_execution.get("phase") == number:
+        render_interactive_execution_log(run_dir, number)
     columns = st.columns([2, 2, 2, 1.2])
     columns[0].markdown("**Prerequisite**\n\n" + phase["prerequisite"])
     columns[1].markdown("**Inputs**\n\n" + phase["inputs"])
@@ -1215,10 +1425,17 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                 except OSError:
                     st.caption("Log file could not be read.")
 
+    if done and number == 1 and run_dir:
+        st.divider()
+        render_phase1_generated_images(run_dir)
+    if done and number == 3 and run_dir:
+        st.divider()
+        render_phase3_outputs(run_dir)
+
     if done and manifest:
         st.divider()
         render_phase_result(number, manifest, run_dir)
-    elif done and run_dir:
+    elif done and run_dir and number != 3:
         st.divider()
         st.subheader("Phase output")
         output_names = {
@@ -1577,6 +1794,9 @@ pending_navigation = st.session_state.pop("pending_page_navigation", None)
 if pending_navigation:
     st.session_state["selected_page"] = pending_navigation["selected_page"]
     st.session_state["diagnostic_page"] = pending_navigation["diagnostic_page"]
+pending_execution = st.session_state.pop("pending_phase_execution", None)
+if pending_execution:
+    launch_interactive_execution(Path(pending_execution["run_dir"]), pending_execution["phase"])
 
 with st.sidebar:
     if st.session_state.get("selected_page") not in PAGE_OPTIONS:
@@ -1632,15 +1852,3 @@ else:
 pending_configuration = st.session_state.get("pending_phase_configuration")
 if pending_configuration is not None:
     phase_configuration_dialog(None if pending_configuration == "all" else int(pending_configuration))
-
-pending_execution = st.session_state.pop("pending_phase_execution", None)
-if pending_execution:
-    execution_run_dir = Path(pending_execution["run_dir"])
-    execution_phase = pending_execution["phase"]
-    if execution_phase is None:
-        st.info(f"Submitted configuration for all six phases · run `{execution_run_dir.name}`. Execution is starting below.")
-        run_all_phases(read_run_configuration(execution_run_dir), run_dir=execution_run_dir)
-    else:
-        phase_name = PHASES[int(execution_phase) - 1]["name"]
-        st.info(f"Submitted configuration for Phase {execution_phase} · {phase_name} · run `{execution_run_dir.name}`. Execution is starting below.")
-        execute_phase(int(execution_phase), execution_run_dir)

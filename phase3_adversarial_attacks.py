@@ -200,7 +200,10 @@ def main() -> int:
     with np.load(args.data_dir / "fingerprint_data.npz", allow_pickle=False) as finger:
         finger_train, finger_train_y = finger["X_train"], finger["y_train"]
         finger_test, finger_test_y = finger["X_test"], finger["y_test"]
-    model = tf.keras.models.load_model(args.data_dir / "baseline_model.keras")
+    # This phase only uses the saved model for inference and copies its weights
+    # into a newly compiled poisoning model. Restoring stale optimizer slots is
+    # unnecessary and can emit a misleading optimizer-variable mismatch warning.
+    model = tf.keras.models.load_model(args.data_dir / "baseline_model.keras", compile=False)
     limit = len(face_test) if args.max_test_samples <= 0 else min(args.max_test_samples, len(face_test))
     face_attack = face_test[:limit].astype(np.float32)
     face_attack_y = face_test_y[:limit]

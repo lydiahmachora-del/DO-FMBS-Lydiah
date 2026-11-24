@@ -187,7 +187,10 @@ def main() -> int:
     with np.load(args.data_dir / "fingerprint_data.npz", allow_pickle=False) as finger:
         finger_train, finger_train_y = finger["X_train"].astype(np.float32), finger["y_train"]
         finger_test, finger_test_y = finger["X_test"].astype(np.float32), finger["y_test"]
-    baseline = tf.keras.models.load_model(args.data_dir / "baseline_model.keras")
+    # Defense training uses the saved weights, not the baseline optimizer state.
+    # Loading without compilation avoids a misleading Adam slot-count warning;
+    # each defense applies updates through its own fresh optimizer below.
+    baseline = tf.keras.models.load_model(args.data_dir / "baseline_model.keras", compile=False)
 
     models = {"baseline": baseline}
     histories = {}
