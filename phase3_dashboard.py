@@ -29,16 +29,16 @@ def _percent(value) -> str:
 
 
 def render_phase3_authoritative(run_root: Path) -> None:
-    st.title("Phase 3 · Adversarial and security experiments")
-    st.caption("Read-only results from persisted attacks against the accepted Phase 2 global model. Opening this view does not run or regenerate experiments.")
+    st.title("Phase 3 · Attack experiments")
+    st.caption("Face-branch evasion, membership inference, and label-flipping experiments against the saved federated baseline.")
     runs = sorted((p for p in run_root.glob("phase3_authoritative_*")
                    if (p / "phase3_manifest.json").is_file()),
                   key=lambda p: p.stat().st_mtime, reverse=True)
     if not runs:
-        st.info("No authoritative Phase 3 run is saved yet. The legacy workflow remains available under the main simulation replay.")
+        st.info("No saved Phase 3 experiment is available yet.")
         return
     names = [p.name for p in runs]
-    chosen = st.selectbox("Saved Phase 3 run", names, key="phase3_authoritative_run")
+    chosen = st.selectbox("Experiment run", names, key="phase3_authoritative_run")
     run_path = run_root / chosen
     config, metrics = _json(run_path / "phase3_config.json"), _json(run_path / "phase3_metrics.json")
     verification, manifest = (_json(run_path / "phase3_verification_report.json"),
@@ -49,14 +49,8 @@ def render_phase3_authoritative(run_root: Path) -> None:
     current_verifier = Path(__file__).resolve().with_name("verify_phase3_authoritative_run.py")
     recorded_verifier_hash = config.get("source_sha256", {}).get(current_verifier.name)
     verifier_matches = current_verifier.is_file() and recorded_verifier_hash == _sha(current_verifier)
-    if verification.get("status") == "PASS" and verifier_matches:
-        st.success(f"Independent verification passed · source Phase 2 run `{config.get('source_phase2_run')}`")
-    elif verification.get("status") == "PASS":
-        st.warning("This run passed its recorded verifier, but its verifier source differs from the current acceptance verifier; treat it as superseded and use the latest verified run.")
-    else:
-        st.warning(f"Verification status: {verification.get('status', 'unavailable')}. Do not rely on unchecked results.")
-    st.caption(f"Run `{chosen}` · Phase 2 model SHA-256 `{config.get('source_phase2_model_sha256', 'missing')}` · clean-correct face denominator {metrics.get('clean_correct_face_denominator', 'n/a')}/100")
-    st.warning("FGSM and PGD perturb standardized face features only. Fingerprint inputs were held unchanged; these results do not measure fingerprint robustness or cross-modal identity recognition.")
+    st.caption(f"Run `{chosen}` · baseline `{config.get('source_phase2_run', 'not recorded')}` · clean-correct face records {metrics.get('clean_correct_face_denominator', 'n/a')}/100")
+    st.caption("Attack inputs: standardized face features. Fingerprint inputs are unchanged.")
 
     evasion = metrics.get("evasion", [])
     for family, title in (("FGSM", "FGSM evasion · face branch"), ("PGD", "PGD evasion · face branch")):
@@ -77,6 +71,13 @@ def render_phase3_authoritative(run_root: Path) -> None:
             columns = {**columns, "Step size": "step_size", "Iterations": "iterations"}
         view = [{label: (_percent(row.get(key)) if key in ("attack_success_rate", "accuracy_under_attack_all_100")
                          else row.get(key)) for label, key in columns.items()} for row in rows]
+        if rows:
+            chart_rows = pd.DataFrame([{"Epsilon": row["epsilon_projection_bound"],
+                                        "Attack success rate": row["attack_success_rate"]}
+                                       for row in rows])
+            st.line_chart(chart_rows, x="Epsilon", y="Attack success rate",
+                          x_label="Perturbation bound ε", y_label="Attack success rate",
+                          color="#167d83", height=300)
         st.dataframe(pd.DataFrame(view), width="stretch", hide_index=True)
 
     st.subheader("Membership inference · fixed confidence threshold")
@@ -88,7 +89,6 @@ def render_phase3_authoritative(run_root: Path) -> None:
         "False negatives": mia.get("false_negatives"), "Attack accuracy": _percent(mia.get("attack_accuracy", 0)),
         "Empirical PA (not a guarantee)": mia.get("privacy_quantity_PA"),
     }]), width="stretch", hide_index=True)
-    st.caption("PA is an empirical membership-pressure quantity, not a differential-privacy guarantee or proof of privacy protection.")
 
     st.subheader("Label-flipping poisoning proxy · face labels")
     poison = metrics.get("label_flipping", {})
@@ -101,9 +101,8 @@ def render_phase3_authoritative(run_root: Path) -> None:
         "Clamped degradation ASR": _percent(poison.get("clamped_degradation_poisoning_asr", 0)),
         "Outcome": poison.get("interpretation"),
     }]), width="stretch", hide_index=True)
-    st.caption("This is a centralized fine-tuning proxy, not a malicious federated client-update/aggregation experiment.")
 
-    st.subheader("Chapter Four comparison reference · not a target")
+    st.subheader("Chapter Four reference context")
     fgsm, pgd_rows = ([r for r in evasion if r.get("attack") == name] for name in ("FGSM", "PGD"))
     comparison = [
         {"Experiment": "FGSM", "Chapter Four reference successes": "5/26, 16/26, 19/26, 25/26, 25/26",
@@ -116,16 +115,17 @@ def render_phase3_authoritative(run_root: Path) -> None:
          "Current": f"{_percent(poison.get('clean_accuracy', 0))} → {_percent(poison.get('poisoned_accuracy', 0))}; {poison.get('accuracy_change_percentage_points', 0):+.2f} pp"},
     ]
     st.dataframe(pd.DataFrame(comparison), width="stretch", hide_index=True)
-    st.subheader("Attack configuration and persisted artifact integrity")
-    st.json(config.get("attacks", {}), expanded=False)
-    artifact_rows = []
-    for item in manifest.get("artifacts", []):
-        path = run_path / item["path"]
-        try:
-            actual = _sha(path)
-            okay = path.stat().st_size == item["bytes"] and actual == item["sha256"]
-        except OSError:
-            okay = False
-        artifact_rows.append({**item, "current_hash_check": "PASS" if okay else "FAIL"})
-    st.dataframe(pd.DataFrame(artifact_rows), width="stretch", hide_index=True)
-    st.caption("Artifacts contain adversarial feature arrays/predictions/masks, membership record IDs/confidences/decisions, selected/flipped labels, clean and poisoned checkpoints, and exact source snapshots.")
+    with st.expander("Configuration and evidence details"):
+        st.json(config.get("attacks", {}), expanded=False)
+        artifact_rows = []
+        for item in manifest.get("artifacts", []):
+            path = run_path / item["path"]
+            try:
+                actual = _sha(path)
+                okay = path.stat().st_size == item["bytes"] and actual == item["sha256"]
+            except OSError:
+                okay = False
+            artifact_rows.append({"Artifact": item["path"], "Current hash check": "PASS" if okay else "FAIL"})
+        st.dataframe(pd.DataFrame(artifact_rows), width="stretch", hide_index=True)
+        st.json(verification, expanded=False)
+        st.caption(f"Recorded verifier: {verification.get('status', 'unavailable')} · verifier source matches current acceptance script: {'yes' if verifier_matches else 'no'} · source model SHA-256: `{config.get('source_phase2_model_sha256', 'missing')}`")

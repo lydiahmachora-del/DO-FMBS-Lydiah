@@ -29,15 +29,15 @@ def _pct(value: object) -> str:
 
 
 def render_phase5_authoritative(run_root: Path) -> None:
-    st.title("Phase 5 · Validation & Testing (Authoritative)")
-    st.caption("Read-only presentation of saved Phase 5 evidence. Models are not retrained and metrics are not regenerated on page load.")
+    st.title("Phase 5 · Model validation")
+    st.caption("Classification, claimed-identity verification, robustness, paired comparisons, and computation measurements.")
     runs = sorted((path for path in run_root.glob("phase5_authoritative_*")
                    if (path / "phase5_manifest.json").is_file()),
                   key=lambda path: path.stat().st_mtime, reverse=True)
     if not runs:
-        st.info("No authoritative Phase 5 run has been saved. Run phase5_authoritative_validation.py to create one.")
+        st.info("No saved Phase 5 validation run is available yet.")
         return
-    chosen = st.selectbox("Saved Phase 5 run", [path.name for path in runs], key="phase5_authoritative_run")
+    chosen = st.selectbox("Validation run", [path.name for path in runs], key="phase5_authoritative_run")
     run = run_root / chosen
     metrics = _json(run / "phase5_metrics.json")
     config = _json(run / "phase5_config.json")
@@ -58,11 +58,9 @@ def render_phase5_authoritative(run_root: Path) -> None:
         all_good &= good
         integrity.append({"Artifact": item["path"], "Bytes": item["bytes"], "SHA-256": item["sha256"],
                           "Current check": "PASS" if good else "FAIL"})
-    if verification.get("status") == "PASS" and all_good:
-        st.success(f"Independent verification PASS · {verification.get('check_count')} checks · manifest integrity PASS · `{chosen}`")
-    else:
-        st.error(f"Verification requires review · verifier={verification.get('status', 'missing')} · manifest={'PASS' if all_good else 'FAIL'}")
-    st.caption(f"Baseline source: `{config.get('source_phase2_run')}` · defended candidate: combined Phase 4 checkpoint `{config.get('source_phase4_run')}`")
+    st.caption(f"Run `{chosen}` · baseline `{config.get('source_phase2_run')}` · defense `{config.get('source_phase4_run')}`")
+    if verification.get("status") != "PASS" or not all_good:
+        st.error("The saved validation evidence needs review before interpretation.")
 
     models = metrics.get("models", {})
     cls_rows = []
@@ -75,7 +73,14 @@ def render_phase5_authoritative(run_root: Path) -> None:
                              "Macro recall": _pct(score.get("macro_recall", 0)), "Macro F1": _pct(score.get("macro_f1", 0))})
     st.subheader("Clean classification · same 100 test records per modality")
     st.dataframe(pd.DataFrame(cls_rows), width="stretch", hide_index=True)
-    st.caption("Face and fingerprint label spaces are independent; positional paired inputs do not mean same-person multimodal fusion.")
+    accuracy_rows = []
+    for model_key, label in (("baseline", "Federated baseline"), ("dofmbs_combined", "Combined defense")):
+        for modality in ("face", "fingerprint"):
+            accuracy_rows.append({"Model": label, "Modality": modality.title(),
+                                  "Accuracy (%)": 100 * models.get(model_key, {}).get(f"{modality}_classification", {}).get("accuracy", 0)})
+    st.bar_chart(pd.DataFrame(accuracy_rows), x="Model", y="Accuracy (%)", color="Modality",
+                 x_label="Model", y_label="Accuracy (%)", height=310)
+    st.caption("Face and fingerprint accuracy are separate identity-classification tasks.")
 
     st.subheader("Robustness · face-only FGSM")
     rob_rows = []
@@ -89,9 +94,9 @@ def render_phase5_authoritative(run_root: Path) -> None:
     if rob_rows:
         robust_frame = pd.DataFrame(rob_rows)
         st.dataframe(robust_frame, width="stretch", hide_index=True)
-        plot = robust_frame.assign(ASR_fraction=robust_frame["ASR"].str.rstrip("%").astype(float) / 100)
-        st.line_chart(plot.pivot(index="Epsilon", columns="Model", values="ASR_fraction"))
-    st.caption(metrics.get("robustness", {}).get("fingerprint_attack", "Fingerprint robustness unavailable."))
+        plot = robust_frame.assign(**{"ASR (%)": robust_frame["ASR"].str.rstrip("%").astype(float)})
+        st.line_chart(plot, x="Epsilon", y="ASR (%)", color="Model",
+                      x_label="FGSM perturbation ε", y_label="Attack success rate (%)", height=300)
 
     st.subheader("Paired statistical comparison")
     statistical_rows = []
@@ -102,7 +107,7 @@ def render_phase5_authoritative(run_root: Path) -> None:
                                  "Identity-cluster 95% CI": str([round(100 * v, 2) for v in result["paired_cluster_bootstrap_95"]]) + " pp",
                                  "Permutation p": f"{result['p_value']:.5f}", "Significant at α=.05": result["significant"]})
     st.dataframe(pd.DataFrame(statistical_rows), width="stretch", hide_index=True)
-    st.caption("Primary test: paired identity-cluster sign-flip permutation; exact record-level McNemar is included as a sensitivity analysis.")
+    st.caption("Primary test: paired identity-cluster sign-flip permutation; record-level McNemar is a sensitivity analysis.")
 
     st.subheader("Operational claimed-identity verification")
     verify_rows = []
@@ -116,7 +121,7 @@ def render_phase5_authoritative(run_root: Path) -> None:
                                 "TAR": _pct(result.get("TAR", 0)), "AUC": f"{result.get('ROC_AUC', 0):.4f}",
                                 "EER": _pct(result.get("EER", 0))})
     st.dataframe(pd.DataFrame(verify_rows), width="stretch", hide_index=True)
-    st.caption("Thresholds are separately calibrated per model and modality using Phase 1 calibration claims, then frozen for evaluation. This is not liveness or spoof detection.")
+    st.caption("Each model and modality uses a threshold calibrated on Phase 1 claims and frozen before evaluation.")
 
     st.subheader("Computation and overhead")
     overhead = metrics.get("computational_measurements", {})
@@ -130,9 +135,8 @@ def render_phase5_authoritative(run_root: Path) -> None:
                           "100-record p95 seconds": latency.get("batch_latency_seconds_p95")})
     st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
     estimate = overhead.get("phase2_raw_float32_weight_transfer_equivalent", {})
-    st.caption(f"Phase 2 training: {overhead.get('phase2_training_seconds_existing_record')} s (saved run record); Phase 4 training/evaluation: {overhead.get('phase4_training_and_evaluation_seconds_existing_record')} s. Raw float32 transfer equivalent: {estimate.get('mib')} MiB derived, not a measured network transfer. Memory: {overhead.get('memory_usage', {}).get('status', 'unavailable')}.")
-
-    st.warning("Limitations: synthetic fingerprint data do not establish real-world fingerprint spoof resistance; attacks are face-only; the two modalities do not represent a shared identity population; measured latency is CPU/runtime-specific; no formal differential privacy, measured network transfer, or reliable memory measurement is claimed.")
-    st.subheader("Artifact integrity")
-    st.dataframe(pd.DataFrame(integrity), width="stretch", hide_index=True)
-    st.json(verification, expanded=False)
+    with st.expander("Measurement notes"):
+        st.caption(f"Recorded training times: Phase 2 {overhead.get('phase2_training_seconds_existing_record')} s; Phase 4 {overhead.get('phase4_training_and_evaluation_seconds_existing_record')} s. Raw float32 transfer estimate: {estimate.get('mib')} MiB; this is derived, not measured network traffic. Memory measurement: {overhead.get('memory_usage', {}).get('status', 'unavailable')}.")
+    with st.expander("Evidence integrity and verification"):
+        st.dataframe(pd.DataFrame(integrity), width="stretch", hide_index=True)
+        st.json(verification, expanded=False)

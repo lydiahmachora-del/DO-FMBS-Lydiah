@@ -32,87 +32,91 @@ RUN_ROOT = ROOT / "runtime_recording"
 
 PHASES = [
     {
-        "number": 1, "name": "Data preparation", "page": "Phase 1 · Data (Legacy)",
+        "number": 1, "name": "Data preparation", "page": "Run Phase 1 · Data preparation",
         "purpose": "Prepare the face and fingerprint datasets, fit preprocessing on training data, and verify the synthetic fingerprint identities before training.",
         "inputs": "LFW face images and seeded fingerprint identity templates.",
         "outputs": "Train/calibration/test partitions, train-only scalers, client partitions, and the fingerprint quality gate.",
         "prerequisite": "None — first phase in a new replay.",
     },
     {
-        "number": 2, "name": "Federated learning", "page": "Phase 2 · Federated",
+        "number": 2, "name": "Federated learning", "page": "Run Phase 2 · Federated baseline",
         "purpose": "Train the independent face and fingerprint identity heads across five class-exclusive non-IID clients and aggregate the local model parameters.",
         "inputs": "Phase 1 partitions, scalers, and exact persisted client files.",
         "outputs": "Federated baseline model, round history, modality losses, and convergence evidence.",
         "prerequisite": "Phase 1 completed successfully.",
     },
     {
-        "number": 3, "name": "Attack simulation", "page": "Phase 3 · Attacks",
+        "number": 3, "name": "Attack simulation", "page": "Run Phase 3 · Attack experiments",
         "purpose": "Measure face-branch FGSM/PGD evasion, confidence-based membership inference, and the controlled label-flipping scenario.",
         "inputs": "Phase 2 baseline and the persisted training/test partitions.",
         "outputs": "Attack settings, denominators, success rates, and attack plots.",
         "prerequisite": "Phase 2 completed successfully.",
     },
     {
-        "number": 4, "name": "Defense mechanisms", "page": "Phase 4 · Defenses",
+        "number": 4, "name": "Defense mechanisms", "page": "Run Phase 4 · Defenses",
         "purpose": "Compare the baseline, DP-inspired gradient noise, adversarial training, and the combined two-modality objective.",
         "inputs": "Phase 2 baseline and Phase 3 attack configuration.",
         "outputs": "Per-modality defense metrics, combined losses, and fingerprint-gradient checks.",
         "prerequisite": "Phase 3 completed successfully.",
     },
     {
-        "number": 5, "name": "Model validation", "page": "Phase 5 · Validation",
+        "number": 5, "name": "Model validation", "page": "Run Phase 5 · Validation",
         "purpose": "Evaluate classification and claimed-identity verification separately for each modality, then report uncertainty and paired comparisons.",
         "inputs": "Phase 2 baseline, Phase 4 final model, and the untouched calibration/test partitions.",
         "outputs": "Classification reports, frozen verification thresholds, FAR/FRR, confidence intervals, ROC curves, and robustness evidence.",
         "prerequisite": "Phase 4 completed successfully.",
     },
     {
-        "number": 6, "name": "Dynamic optimization", "page": "Phase 6 · Optimization",
+        "number": 6, "name": "Dynamic optimization", "page": "Run Phase 6 · Dynamic optimization",
         "purpose": "Fit the declared constrained simulation model, check its diagnostics, and calculate the round-specific control schedule.",
         "inputs": "Completed phase evidence and the declared seeded factorial simulation.",
         "outputs": "Coefficients, constraints, diagnostics, sensitivity analysis, and the optimization schedule.",
         "prerequisite": "Phase 5 completed successfully.",
     },
 ]
-RESEARCH_COMPARISON_PAGE = "Research simulation - All phases"
-PAGE_OPTIONS = ["Overview", RESEARCH_COMPARISON_PAGE, *[phase["page"] for phase in PHASES], "Evidence & provenance"]
-PHASE1_REBUILD_PAGE = "Phase 1 · Chapter Four (Authoritative)"
-PAGE_OPTIONS.append(PHASE1_REBUILD_PAGE)
-PHASE2_AUTHORITATIVE_PAGE = "Phase 2 · Federated (Chapter Four)"
-PAGE_OPTIONS.append(PHASE2_AUTHORITATIVE_PAGE)
-PHASE3_AUTHORITATIVE_PAGE = "Phase 3 · Attacks (Authoritative)"
-PAGE_OPTIONS.append(PHASE3_AUTHORITATIVE_PAGE)
-PHASE4_AUTHORITATIVE_PAGE = "Phase 4 · Defenses (Authoritative)"
-PAGE_OPTIONS.append(PHASE4_AUTHORITATIVE_PAGE)
-PHASE5_AUTHORITATIVE_PAGE = "Phase 5 · Validation & Testing (Authoritative)"
-PAGE_OPTIONS.append(PHASE5_AUTHORITATIVE_PAGE)
-PHASE6_AUTHORITATIVE_PAGE = "Phase 6 · Dynamic Optimization (Authoritative)"
-PAGE_OPTIONS.append(PHASE6_AUTHORITATIVE_PAGE)
+RESEARCH_COMPARISON_PAGE = "Cross-Phase Analysis"
+RESEARCH_SCOPE_PAGE = "Research Scope & Limitations"
+PHASE1_REBUILD_PAGE = "Phase 1 · Data preparation"
+PHASE2_AUTHORITATIVE_PAGE = "Phase 2 · Federated baseline"
+PHASE3_AUTHORITATIVE_PAGE = "Phase 3 · Attack experiments"
+PHASE4_AUTHORITATIVE_PAGE = "Phase 4 · Defense mechanisms"
+PHASE5_AUTHORITATIVE_PAGE = "Phase 5 · Model validation"
+PHASE6_AUTHORITATIVE_PAGE = "Phase 6 · Dynamic optimization"
+PAGE_OPTIONS = [
+    "Overview", RESEARCH_COMPARISON_PAGE, PHASE1_REBUILD_PAGE,
+    PHASE2_AUTHORITATIVE_PAGE, PHASE3_AUTHORITATIVE_PAGE,
+    PHASE4_AUTHORITATIVE_PAGE, PHASE5_AUTHORITATIVE_PAGE,
+    PHASE6_AUTHORITATIVE_PAGE, RESEARCH_SCOPE_PAGE,
+]
+DIAGNOSTIC_OPTIONS = ["Choose a workflow view", *[phase["page"] for phase in PHASES], "Evidence & provenance"]
 
 st.set_page_config(page_title="DO-FMBS | Simulation workspace", page_icon="🧬", layout="wide")
 st.markdown("""
 <style>
-    :root { --navy:#10283f; --blue:#1e4b70; --teal:#087f8c; --ink:#172b3a; --muted:#667887; }
-    .block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1500px; }
-    [data-testid="stSidebar"] { background: linear-gradient(180deg,#10283f 0%,#173c59 100%); }
-    [data-testid="stSidebar"] * { color:#eef5f7; }
-    [data-testid="stSidebar"] [data-testid="stRadio"] label { color:#edf5f7; }
-    .hero { padding:1.5rem 1.8rem; border-radius:16px; color:white; background:linear-gradient(115deg,#10283f,#1e5873); margin-bottom:1rem; }
-    .hero h1 { color:white; margin:0 0 .35rem 0; font-size:2rem; }
-    .hero p { color:#d5e5ec; margin:0; }
-    .eyebrow { color:#82d2d0; text-transform:uppercase; letter-spacing:.12em; font-size:.74rem; font-weight:700; }
-    .phase-card { background:#f5f8fa; border:1px solid #e1e8ed; border-radius:12px; padding:1rem 1.1rem; min-height:132px; }
-    .phase-card h4 { color:#173c59; margin:.15rem 0 .45rem 0; }
-    .phase-card p { color:#526574; font-size:.9rem; margin:0; }
-    .small-muted { color:#667887; font-size:.86rem; }
-    div[data-testid="stMetric"] { background:#f7fafb; border:1px solid #e5ecef; padding:.7rem .85rem; border-radius:10px; }
-    .stButton > button[kind="primary"] { background:#087f8c; border-color:#087f8c; }
+    :root { --navy:#16324a; --blue:#285875; --teal:#167d83; --ink:#1c2d3a; --muted:#657785; --line:#dce5ea; }
+    .block-container { padding-top:1.5rem; padding-bottom:2.8rem; max-width:1480px; }
+    [data-testid="stSidebar"] { background:#17344d; border-right:1px solid #294a63; }
+    [data-testid="stSidebar"] * { color:#eef4f7; }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label { color:#edf4f7; }
+    .hero { padding:1.35rem 1.55rem; border-radius:12px; color:white; background:#173b56; margin-bottom:1rem; }
+    .hero h1 { color:white; margin:0 0 .35rem 0; font-size:1.9rem; }
+    .hero p { color:#d6e2e9; margin:0; }
+    .eyebrow { color:#7dd0ca; text-transform:uppercase; letter-spacing:.1em; font-size:.72rem; font-weight:700; }
+    .phase-card { background:#f7f9fa; border:1px solid var(--line); border-radius:10px; padding:.9rem 1rem; min-height:122px; }
+    .phase-card h4 { color:var(--navy); margin:.15rem 0 .4rem 0; }
+    .phase-card p { color:#526574; font-size:.88rem; margin:0; line-height:1.45; }
+    .small-muted { color:var(--muted); font-size:.86rem; }
+    div[data-testid="stMetric"] { background:#f8fafb; border:1px solid var(--line); padding:.65rem .8rem; border-radius:9px; }
+    [data-testid="stPlotlyChart"], [data-testid="stVegaLiteChart"] { border:1px solid var(--line); border-radius:10px; background:#fff; padding:.25rem; }
+    .stButton > button[kind="primary"] { background:#176f79; border-color:#176f79; }
+    h1, h2, h3 { color:#17364e; letter-spacing:-.015em; }
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     [data-testid="stSidebar"] [data-testid="stButton"] > button {
-        background:#087f8c !important; color:#ffffff !important;
-        border:1px solid #62c5cb !important; font-weight:700 !important;
+        background:#176f79 !important; color:#ffffff !important;
+        border:1px solid #5aa9a8 !important; font-weight:700 !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
-        background:#066a75 !important; border-color:#8be0df !important;
+        background:#125d65 !important; border-color:#8bc5c1 !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] > button:focus-visible {
         outline:3px solid #f4c95d !important; outline-offset:2px !important;
@@ -302,9 +306,8 @@ def phase_artifact_path(run_dir: Path | None, manifest: dict | None, phase: int,
 
 
 def run_streamed(command: list[str], title: str) -> bool:
-    output = st.empty()
     lines: list[str] = []
-    status = st.status(title, expanded=True)
+    status = st.status(f"Running · {title}", expanded=False)
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
     environment["MPLBACKEND"] = "Agg"
@@ -314,18 +317,26 @@ def run_streamed(command: list[str], title: str) -> bool:
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            lines.append(line.rstrip())
-            output.code("\n".join(lines[-45:]), language="text")
+        with st.expander("Technical execution log", expanded=False):
+            output = st.empty()
+            for line in process.stdout:
+                lines.append(line.rstrip())
+                output.code("\n".join(lines[-45:]), language="text")
         return_code = process.wait()
     except OSError as error:
-        status.update(label=f"Could not start: {title}", state="error")
-        st.error(str(error))
+        status.update(label=f"Error · {title}", state="error", expanded=False)
+        st.error("The simulation process could not be started.")
+        with st.expander("Technical details"):
+            st.code(str(error))
         return False
     if return_code == 0:
-        status.update(label=f"Completed: {title}", state="complete", expanded=False)
+        status.update(label=f"Completed · {title}", state="complete", expanded=False)
         return True
-    status.update(label=f"Failed: {title} (exit {return_code})", state="error", expanded=True)
+    status.update(label=f"Error · {title}", state="error", expanded=False)
+    st.error("This phase ended with an execution error. Review the technical log for details.")
+    with st.expander("Technical details"):
+        st.write(f"Process exit code: {return_code}")
+        st.code("\n".join(lines[-80:]), language="text")
     return False
 
 
@@ -338,8 +349,13 @@ def start_new_replay() -> Path:
         suffix += 1
     run_dir.mkdir(parents=True, exist_ok=False)
     st.session_state["active_run_dir"] = str(run_dir)
-    st.session_state["selected_page"] = PHASES[0]["page"]
+    st.session_state["selected_page"] = "Overview"
+    st.session_state["diagnostic_page"] = PHASES[0]["page"]
     return run_dir
+
+
+def clear_diagnostic_page() -> None:
+    st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
 
 
 def execute_phase(phase_number: int, run_dir: Path) -> bool:
@@ -429,7 +445,7 @@ def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path 
         return
 
     if phase_number == 1:
-        st.warning("Legacy Phase 1 view. Its train-only scaler and three-way split are not the submitted Chapter Four protocol. Use ‘Phase 1 · Chapter Four (Authoritative)’ for the source-controlled implementation and persisted corrected replay.")
+        st.info("This interactive replay uses its own preparation workflow. For the Chapter Four reproduction and accepted persisted results, see the Phase 1 research page and Research Scope & Limitations.")
         data_dir = phase1_artifact_root(manifest, run_dir)
         if data_dir is None:
             st.info("Start a replay to inspect its persisted Phase 1 datasets and evidence.")
@@ -633,46 +649,47 @@ def render_phase_result(phase_number: int, manifest: dict | None, run_dir: Path 
 
 
 def render_overview(manifest: dict | None, records: list[dict], run_dir: Path | None) -> None:
-    st.markdown('<div class="hero"><div class="eyebrow">Research simulation workspace</div><h1>DO-FMBS</h1><p>Six phases, traceable inputs, visible execution, and evidence from one replay.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="eyebrow">Federated multimodal biometric research</div><h1>DO-FMBS</h1><p>Data preparation, federated learning, security evaluation, defense, validation, and dynamic optimization.</p></div>', unsafe_allow_html=True)
     done = completed_phases(records)
     if manifest:
-        state_text = "Completed replay"
+        state_text = "Completed"
         replay_id = manifest["replay_id"]
         runtime = manifest.get("runtime", {}).get("total_seconds", 0.0)
     elif run_dir:
-        state_text = "Replay in progress"
+        state_text = "In progress"
         replay_id = run_dir.name
         runtime = sum(float(row.get("elapsed_seconds", 0)) for row in records)
     else:
-        state_text = "Ready to begin"
-        replay_id = "No active replay"
+        state_text = "Not started"
+        replay_id = "No interactive replay selected"
         runtime = 0.0
-    metric_card_row([("Replay status", state_text), ("Replay ID", replay_id),
-                     ("Phase progress", f"{len(done)}/6"), ("Recorded runtime", f"{runtime:.1f} sec")])
-    st.progress(len(done) / 6, text=f"Simulation pipeline: {len(done)} of 6 phases complete")
-    st.markdown("### Phase workflow")
+    metric_card_row([("Interactive run", state_text), ("Run", replay_id),
+                     ("Phases completed", f"{len(done)} / 6"), ("Elapsed time", f"{runtime:.1f} s")])
+    if run_dir or manifest:
+        st.progress(len(done) / 6, text=f"Interactive workflow · {len(done)} of 6 phases completed")
+    else:
+        st.caption("Accepted phase results are available under Cross-Phase Analysis. Use Start Simulation in the sidebar to begin a separate interactive replay.")
+    st.markdown("### Research workflow")
     for offset in range(0, 6, 3):
         cols = st.columns(3)
         for col, phase in zip(cols, PHASES[offset:offset + 3]):
             number = phase["number"]
-            status_text = "Complete" if number in done else ("Ready" if number == (len(done) + 1) else "Waiting")
+            failed = next((row for row in records if int(row.get("phase", 0)) == number and int(row.get("exit_code", 0)) != 0), None)
+            status_text = "Error" if failed else ("Completed" if number in done else ("Queued" if number == (len(done) + 1) else "Waiting"))
             col.markdown(
                 f'<div class="phase-card"><div class="eyebrow">Phase {number} · {status_text}</div>'
                 f'<h4>{phase["name"]}</h4><p>{phase["purpose"]}</p></div>',
                 unsafe_allow_html=True,
             )
-    st.markdown("### Research guardrails")
-    st.write("Face and fingerprint branches have separate identity spaces. Fingerprints are synthetic and identity-persistent. Evasion results are face-branch only. Gradient noise is DP-inspired and has no formal epsilon/delta guarantee.")
-    if run_dir is None:
-        st.button("Start a new phase-by-phase simulation", type="primary", use_container_width=True,
-                  on_click=start_new_replay)
+    if run_dir is None and not manifest:
+        st.info("Use Start Simulation in the sidebar to create a new isolated run.")
     elif len(done) == 6 and manifest:
-        st.success("The active replay completed all six phases and passed the independent evidence audit.")
+        st.info("This interactive replay is complete. Its execution record is available in Technical diagnostics.")
     elif done:
         next_phase = min(max(done) + 1, 6)
-        st.info(f"Next phase: {PHASES[next_phase - 1]['name']}. Select it in the sidebar to review its process and run it.")
+        st.info(f"Next step: {PHASES[next_phase - 1]['name']}.")
     else:
-        st.info("A new replay folder is ready. Select Phase 1 in the sidebar to begin data preparation.")
+        st.info("A new run folder is ready. Open Technical diagnostics → Run Phase 1 to begin the sequential workflow.")
 
 
 def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
@@ -687,7 +704,8 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
     columns[0].markdown("**Prerequisite**\n\n" + phase["prerequisite"])
     columns[1].markdown("**Inputs**\n\n" + phase["inputs"])
     columns[2].markdown("**Outputs**\n\n" + phase["outputs"])
-    columns[3].metric("Status", "Complete" if done else ("Failed" if record and record.get("exit_code", 0) else "Waiting"))
+    phase_status = "Completed" if done else ("Error" if record and int(record.get("exit_code") or 0) != 0 else "Waiting")
+    columns[3].metric("Status", phase_status)
 
     run_config = manifest.get("phase_parameters", {}) if manifest else {}
     config_key = f"phase{number}"
@@ -698,28 +716,28 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
 
     phase_is_next = number == 1 or all(index in completed for index in range(1, number))
     if run_dir is None:
-        st.warning("To execute phases in order, start a new replay from Overview. The accepted replay shown elsewhere remains available as read-only evidence.")
+        st.info("Start a new interactive run from Overview to execute phases in sequence.")
     elif phase_is_next:
         if done:
-            st.success(f"Phase {number} is complete in replay `{run_dir.name}`.")
-            st.caption("This phase is locked for the current replay to preserve downstream consistency. Start another replay to recompute it.")
+            st.success(f"Phase {number} completed in run `{run_dir.name}`.")
+            st.caption("This run is retained as recorded. Start a new run to execute the workflow again.")
         else:
-            st.info("The phase runner will stream its console output here. Each phase writes into this replay's isolated folder.")
-            if st.button(f"Run Phase {number}: {phase['name']}", type="primary"):
+            st.caption("Results are saved to this run's isolated folder.")
+            if st.button(f"Run Phase {number}", type="primary"):
                 execute_phase(number, run_dir)
         if number == 6 and done and not manifest:
-            st.warning("Phase 6 finished, but audit or manifest publication did not. Retry finalization without rerunning model phases.")
-            if st.button("Retry audit and publish evidence", type="primary"):
+            st.error("Phase 6 completed, but final evidence could not be published.")
+            if st.button("Retry evidence publication", type="primary"):
                 finalize_replay(run_dir)
     else:
         waiting_for = next((index for index in range(1, number) if index not in completed), None)
-        st.warning(f"Complete Phase {waiting_for} first. The workflow keeps phase inputs and evidence in sequence.")
+        st.info(f"Complete Phase {waiting_for} before running this phase.")
 
     if record:
         st.caption(f"Last run: {record.get('start_timestamp', 'time unavailable')} · {float(record.get('elapsed_seconds', 0)):.1f} sec · exit {record.get('exit_code')}")
         log = run_dir / record.get("log_path", f"phase{number}_console.log") if run_dir else None
         if log and log.exists():
-            with st.expander("Phase console log", expanded=not done):
+            with st.expander("Technical execution log", expanded=False):
                 try:
                     st.code("\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]), language="text")
                 except OSError:
@@ -749,11 +767,12 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                 else:
                     st.json(payload, expanded=False)
         else:
-            st.info("Phase 6 outputs are saved in the replay's simulation_evidence/constrained_dynamic_model folder.")
+            st.info("Optimization outputs are saved with this run's simulation evidence.")
 
 
 def render_evidence(manifest: dict | None, records: list[dict], manifest_path: Path | None) -> None:
-    st.title("Evidence & provenance")
+    st.title("Interactive run diagnostics")
+    st.caption("Detailed execution records and artifact provenance for the sequential interactive run.")
     if not manifest:
         st.info("A synchronized manifest is published after all six phases and the independent audit complete.")
         if records:
@@ -774,9 +793,26 @@ def render_evidence(manifest: dict | None, records: list[dict], manifest_path: P
                        file_name="final_evidence_manifest.json", mime="application/json")
 
 
+def render_research_scope() -> None:
+    st.title("Research Scope & Limitations")
+    st.caption("Interpretation boundaries for the experiments and results shown in this application.")
+    st.subheader("Research scope")
+    st.markdown("""
+    - Face and fingerprint branches use independent identity populations; paired rows synchronize computation and do not denote matched people.
+    - Fingerprint images are generated synthetic ridge impressions, not samples from a public or operational fingerprint database.
+    - Phase 3 evasion and Phase 5 robustness experiments perturb face features; they do not establish fingerprint attack robustness.
+    - The gradient-noise defense is DP-inspired. No formal differential-privacy guarantee or privacy budget is reported.
+    - Phase 1 reproduces the Chapter Four order in which `StandardScaler` is fitted before the train/test split; held-out distribution statistics therefore enter preprocessing.
+    - Phase 6 uses controlled synthetic observations. Its predicted response and policy schedule are simulation outputs, not measurements from a live federation.
+    - Verification metrics describe claimed-identity matching under the recorded protocol; they do not measure liveness or presentation-attack detection.
+    """)
+    st.subheader("Interpretation")
+    st.write("Read classification, verification, attack, defense, and optimization results as separate outcomes with their recorded denominators and evaluation protocols. Each phase page provides the relevant configuration and saved evidence.")
+
+
 def render_phase1_rebuild() -> None:
-    st.title("Phase 1 · Chapter Four implementation (Authoritative)")
-    st.caption("This isolated implementation follows the submitted Chapter Four Phase 1 specification. It is separate from both the historical full-pipeline replay and the legacy Phase 1 dashboard view; it does not launch Phases 2–6.")
+    st.title("Phase 1 · Data preparation")
+    st.caption("Face and synthetic fingerprint datasets, preprocessing, verification partitions, and identity-exclusive client allocation.")
     runs = sorted((path for pattern in ("phase1_reimplementation_*", "phase1_final_candidate_*")
                    for path in RUN_ROOT.glob(pattern)
                    if (path / "phase1_manifest.json").is_file()),
@@ -792,7 +828,7 @@ def render_phase1_rebuild() -> None:
     else:
         data_dir = Path(current) if current else None
 
-    if st.button("Start final-candidate Phase 1 replay", type="primary", key="start_source_faithful_phase1"):
+    if st.button("Run Phase 1", type="primary", key="start_source_faithful_phase1"):
         stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
         output = RUN_ROOT / f"phase1_final_candidate_{stamp}"
         suffix = 1
@@ -800,21 +836,18 @@ def render_phase1_rebuild() -> None:
             output = RUN_ROOT / f"phase1_final_candidate_{stamp}_{suffix}"
             suffix += 1
         if run_streamed([sys.executable, "-u", str(ROOT / "phase1_reimplementation.py"),
-                           "--output-dir", str(output)], "Fresh Chapter Four Phase 1"):
+                           "--output-dir", str(output)], "Phase 1 · Data preparation"):
             st.session_state["phase1_rebuild_dir"] = str(output)
             st.rerun()
         return
 
     if data_dir is None or not (data_dir / "phase1_manifest.json").is_file():
-        st.info("No isolated Phase 1 rebuild is saved yet. Start one above; the existing historical replay will not be overwritten.")
+        st.info("No saved Phase 1 run is available yet.")
         return
 
     result = inspect_rebuilt_phase1(data_dir)
     manifest = result.get("manifest", {})
     metadata = manifest.get("metadata", {})
-    st.subheader("Replay identity and source")
-    st.write(f"Active replay: `{manifest.get('replay_id', 'unknown')}`")
-    st.write(f"Source document SHA-256: `{metadata.get('source_document_sha256', 'not recorded')}`")
     config = manifest.get("configuration", {})
     seed_rows = []
     for source_name, details in config.get("seeds", {}).items():
@@ -822,22 +855,13 @@ def render_phase1_rebuild() -> None:
                           "Seed": details.get("value", details.get("base")),
                           "Purpose": details.get("purpose"),
                           "Derivation": details.get("formula", "")})
-    st.subheader("Reproducibility configuration")
-    st.dataframe(pd.DataFrame(seed_rows), use_container_width=True, hide_index=True)
-    st.json(config.get("lfw_acquisition", {}), expanded=False)
-    st.subheader("Generator source and dependency versions")
-    st.json(config.get("generator_provenance", {}), expanded=False)
-    st.subheader("Approved fingerprint methodology clarification")
-    st.caption(config.get("methodology_clarification", {}).get("document", "Not recorded"))
-    fingerprint_config = config.get("fingerprint_generation", {})
-    st.json(fingerprint_config, expanded=False)
-    st.caption(f"Evidence directory: `{data_dir.relative_to(ROOT).as_posix()}` · replay `{manifest.get('replay_id', 'unknown')}`")
-    st.subheader("Live independent verification")
-    if result["status"] == "PASS":
-        st.success("All Phase 1 checks pass against the persisted files and current SHA-256 values.")
-    else:
-        st.error("One or more Phase 1 checks failed. Review the actual check details below.")
-    st.dataframe(pd.DataFrame(result["checks"]), use_container_width=True, hide_index=True)
+    with st.expander("Configuration and provenance"):
+        st.write(f"Run `{manifest.get('replay_id', 'unknown')}` · source document SHA-256 `{metadata.get('source_document_sha256', 'not recorded')}`")
+        st.dataframe(pd.DataFrame(seed_rows), use_container_width=True, hide_index=True)
+        st.json(config.get("lfw_acquisition", {}), expanded=False)
+        st.json(config.get("generator_provenance", {}), expanded=False)
+        st.caption(f"Methodology clarification: {config.get('methodology_clarification', {}).get('document', 'not recorded')}")
+        st.json(config.get("fingerprint_generation", {}), expanded=False)
 
     rows = []
     for modality in ("face", "fingerprint"):
@@ -849,9 +873,8 @@ def render_phase1_rebuild() -> None:
                          "Features": item.get("features"), "Train": item.get("train"), "Test": item.get("test")})
     st.subheader("Persisted datasets and splits")
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.subheader("Preprocessing order and limitation")
-    st.info(metadata.get("preprocessing", "Preprocessing metadata is missing."))
-    st.warning("Full-array scaler leakage: StandardScaler is fitted before the train/test split, so held-out distribution statistics enter preprocessing. This reproduces the submitted Chapter Four procedure; it is disclosed, not endorsed as leakage-free evaluation.")
+    st.subheader("Preprocessing")
+    st.caption(metadata.get("preprocessing", "Preprocessing metadata is unavailable."))
 
     st.subheader("Verification partitions")
     verification_rows = []
@@ -873,49 +896,49 @@ def render_phase1_rebuild() -> None:
     st.subheader("Persistent identity-exclusive clients")
     client_frame = pd.DataFrame(result.get("clients", []))
     if not client_frame.empty:
-        st.bar_chart(client_frame.set_index("Client")[["Face samples", "Fingerprint samples"]])
+        st.bar_chart(client_frame, x="Client", y=["Face samples", "Fingerprint samples"],
+                     x_label="Client", y_label="Training samples", height=300,
+                     color=["#285875", "#167d83"])
         st.dataframe(client_frame, use_container_width=True, hide_index=True)
     else:
         st.warning("Client evidence is unavailable or failed validation.")
 
-    st.subheader("Persisted identity-to-label mappings")
-    try:
-        with np.load(data_dir / "face_data.npz", allow_pickle=False) as face_data:
-            face_mapping = pd.DataFrame({
-                "Label": np.arange(len(face_data["target_names"]), dtype=int),
-                "LFW identity": face_data["target_names"].astype(str),
-            })
-        with np.load(data_dir / "fingerprint_data.npz", allow_pickle=False) as finger_data:
-            finger_labels = np.unique(np.concatenate((finger_data["y_train"], finger_data["y_test"])))
-        finger_mapping = pd.DataFrame({"Synthetic identity ID": finger_labels.astype(int),
-                                       "Label": finger_labels.astype(int)})
-        left, right = st.columns(2)
-        left.markdown("**Face identity → label**")
-        left.dataframe(face_mapping, use_container_width=True, hide_index=True, height=360)
-        right.markdown("**Synthetic fingerprint identity → label**")
-        right.dataframe(finger_mapping, use_container_width=True, hide_index=True, height=360)
-    except (OSError, KeyError, ValueError) as error:
-        st.error(f"Could not read persisted identity mappings: {error}")
-
-    st.subheader("Samples from persisted raw arrays")
-    try:
-        face_data = np.load(data_dir / "face_data.npz", allow_pickle=False)
-        finger_data = np.load(data_dir / "fingerprint_data.npz", allow_pickle=False)
-        left, right = st.columns(2)
-        left.image(face_data["images_train"][0], caption="LFW training sample", clamp=True)
-        right.image(finger_data["images_train"][0], caption="Synthetic fingerprint training sample", clamp=True)
-        face_data.close()
-        finger_data.close()
-    except (OSError, KeyError, ValueError) as error:
-        st.error(f"Could not load persisted sample images: {error}")
-
-    st.subheader("Hashed Phase 1 artifacts")
-    st.dataframe(pd.DataFrame(manifest.get("artifacts", [])), use_container_width=True, hide_index=True)
+    with st.expander("Identity mappings and sample images"):
+        try:
+            with np.load(data_dir / "face_data.npz", allow_pickle=False) as face_data:
+                face_mapping = pd.DataFrame({
+                    "Label": np.arange(len(face_data["target_names"]), dtype=int),
+                    "LFW identity": face_data["target_names"].astype(str),
+                })
+            with np.load(data_dir / "fingerprint_data.npz", allow_pickle=False) as finger_data:
+                finger_labels = np.unique(np.concatenate((finger_data["y_train"], finger_data["y_test"])))
+                finger_preview = finger_data["images_train"][0]
+            left, right = st.columns(2)
+            left.markdown("**Face identity → label**")
+            left.dataframe(face_mapping, use_container_width=True, hide_index=True, height=320)
+            right.markdown("**Synthetic fingerprint identity → label**")
+            right.dataframe(pd.DataFrame({"Identity ID": finger_labels.astype(int),
+                                          "Label": finger_labels.astype(int)}),
+                            use_container_width=True, hide_index=True, height=320)
+            face_data = np.load(data_dir / "face_data.npz", allow_pickle=False)
+            image_left, image_right = st.columns(2)
+            image_left.image(face_data["images_train"][0], caption="Face training sample", clamp=True)
+            image_right.image(finger_preview, caption="Synthetic fingerprint training sample", clamp=True)
+            face_data.close()
+        except (OSError, KeyError, ValueError) as error:
+            st.error("Saved identity mappings or sample images could not be loaded.")
+            with st.expander("Technical details"):
+                st.code(str(error))
+    with st.expander("Verification and artifact details"):
+        if result.get("status") != "PASS":
+            st.error("One or more persisted data checks need review.")
+        st.dataframe(pd.DataFrame(result.get("checks", [])), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(manifest.get("artifacts", [])), use_container_width=True, hide_index=True)
 
 
 def render_phase2_authoritative() -> None:
-    st.title("Phase 2 · Federated training (Chapter Four)")
-    st.write("Train the dual-branch baseline from a verified Phase 1 replay. Face and fingerprint identities remain independent; paired rows synchronize computation only and do not imply that inputs belong to the same person.")
+    st.title("Phase 2 · Federated baseline")
+    st.caption("Train face and fingerprint identity classifiers across five federated clients and inspect their round-by-round convergence.")
     phase1_runs = sorted(
         (path for path in RUN_ROOT.glob("phase1_final_candidate_*")
          if (path / "phase1_manifest.json").is_file()
@@ -923,11 +946,11 @@ def render_phase2_authoritative() -> None:
         key=lambda path: path.stat().st_mtime, reverse=True,
     )
     if not phase1_runs:
-        st.error("No verified final-candidate Phase 1 replay is available. Complete Phase 1 first.")
+        st.info("A verified Phase 1 dataset run is required before federated training.")
         return
 
     selected_phase1 = st.selectbox(
-        "Verified Phase 1 source replay", [path.name for path in phase1_runs],
+        "Phase 1 dataset run", [path.name for path in phase1_runs],
         index=next((i for i, path in enumerate(phase1_runs)
                     if path.name == "phase1_final_candidate_20261123_182623"), 0),
         key="phase2_source_phase1",
@@ -937,14 +960,16 @@ def render_phase2_authoritative() -> None:
     phase1_report = load_json(phase1_dir / "phase1_verification_report.json") or {}
     source_ok = (phase1_report.get("status") == "PASS"
                  and phase1_manifest.get("verification", {}).get("status") == "PASS")
-    st.caption(f"Source Phase 1: `{selected_phase1}` · saved independent verification: {'PASS' if source_ok else 'NOT PASS'} · Phase 1 files are read-only inputs.")
+    st.caption(f"Dataset source: `{selected_phase1}` · {'verified inputs' if source_ok else 'input verification needs review'}")
+    if not source_ok:
+        st.error("This Phase 1 run has not passed its saved verification; training is unavailable.")
 
     phase2_runs = sorted(
         (path for path in RUN_ROOT.glob("phase2_authoritative_*")
          if (path / "phase2_manifest.json").is_file()),
         key=lambda path: path.stat().st_mtime, reverse=True,
     )
-    if source_ok and st.button("Start Phase 2 federated training", type="primary", key="start_authoritative_phase2"):
+    if source_ok and st.button("Run Phase 2", type="primary", key="start_authoritative_phase2"):
         stamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d_%H%M%S")
         output_dir = RUN_ROOT / f"phase2_authoritative_{stamp}"
         suffix = 1
@@ -953,16 +978,16 @@ def render_phase2_authoritative() -> None:
             suffix += 1
         command = [sys.executable, "-u", str(ROOT / "phase2_authoritative_training.py"),
                    "--phase1-dir", str(phase1_dir), "--output-dir", str(output_dir)]
-        if run_streamed(command, "Phase 2 federated training"):
+        if run_streamed(command, "Phase 2 · Federated baseline"):
             st.session_state["phase2_authoritative_run"] = output_dir.name
             st.rerun()
         return
 
     if not phase2_runs:
-        st.info("No Phase 2 run is saved yet. Starting training creates a new timestamped run and does not overwrite prior evidence.")
+        st.info("No saved Phase 2 run is available yet. Running this phase creates a new timestamped run.")
         return
     chosen_run = st.selectbox(
-        "Saved Phase 2 run", [path.name for path in phase2_runs],
+        "Experiment run", [path.name for path in phase2_runs],
         index=next((i for i, path in enumerate(phase2_runs)
                     if path.name == st.session_state.get("phase2_authoritative_run")), 0),
         key="phase2_saved_run",
@@ -976,13 +1001,14 @@ def render_phase2_authoritative() -> None:
         st.error("This saved Phase 2 run is missing required persisted evidence.")
         return
 
-    st.subheader("Run identity and configuration")
-    st.write(f"Selected Phase 2 run: `{chosen_run}` · Phase 1 source: `{metrics.get('phase1_replay_id', 'unknown')}`")
-    st.caption(f"Audit status: {verification.get('status', 'unknown')} · no Phase 3–6 results are included in this Phase 2 view.")
-    st.json({key: config.get(key) for key in (
-        "clients", "rounds", "local_epochs", "batch_size", "learning_rate", "dropout_rate",
-        "loss", "loss_weights", "pairing", "random_seeds", "environment", "determinism",
-    )}, expanded=False)
+    st.caption(f"Run `{chosen_run}` · dataset source `{metrics.get('phase1_replay_id', 'unknown')}`")
+    if verification.get("status") != "PASS":
+        st.error("The saved training evidence needs review before interpretation.")
+    with st.expander("Training configuration"):
+        st.json({key: config.get(key) for key in (
+            "clients", "rounds", "local_epochs", "batch_size", "learning_rate", "dropout_rate",
+            "loss", "loss_weights", "pairing", "random_seeds", "environment", "determinism",
+        )}, expanded=False)
 
     face = metrics.get("face_classification", {})
     finger = metrics.get("fingerprint_classification", {})
@@ -991,21 +1017,25 @@ def render_phase2_authoritative() -> None:
     cards[1].metric("Communication rounds", str(config.get("rounds", "—")))
     cards[2].metric("Face test accuracy", percent(face.get("accuracy", 0)))
     cards[3].metric("Fingerprint test accuracy", percent(finger.get("accuracy", 0)))
-    st.caption("Face and fingerprint classification are reported separately; these values are not person-level multimodal accuracy.")
+    st.caption("Face and fingerprint results use separate identity label spaces.")
 
     try:
         round_frame = pd.read_csv(run_path / "round_metrics.csv")
         left, right = st.columns(2)
-        left.subheader("Global model test accuracy by round")
-        left.line_chart(round_frame.set_index("round")[["test_face_output_accuracy", "test_finger_output_accuracy"]])
-        right.subheader("Global model cross-entropy by round")
-        right.line_chart(round_frame.set_index("round")[["test_face_output_loss", "test_finger_output_loss"]])
-        with st.expander("All per-round global train/test values", expanded=False):
+        left.subheader("Test accuracy by round")
+        left.line_chart(round_frame, x="round", y=["test_face_output_accuracy", "test_finger_output_accuracy"],
+                        x_label="Federated round", y_label="Accuracy", height=310,
+                        color=["#285875", "#167d83"])
+        right.subheader("Cross-entropy loss by round")
+        right.line_chart(round_frame, x="round", y=["test_face_output_loss", "test_finger_output_loss"],
+                         x_label="Federated round", y_label="Cross-entropy loss", height=310,
+                         color=["#285875", "#167d83"])
+        with st.expander("Round-level training and test values", expanded=False):
             st.dataframe(round_frame, use_container_width=True, hide_index=True)
     except (OSError, ValueError, KeyError) as error:
         st.error(f"Could not read round metrics: {error}")
 
-    st.subheader("Five-client allocation and training evidence")
+    st.subheader("Five-client allocation")
     allocation = load_json(run_path / "client_allocation.json") or {}
     client_rows = [{
         "Client": client.get("client_id"),
@@ -1016,18 +1046,19 @@ def render_phase2_authoritative() -> None:
         "Fingerprint label space": "separate 0–99",
     } for client in allocation.get("clients", [])]
     st.dataframe(pd.DataFrame(client_rows), use_container_width=True, hide_index=True)
-    histories = load_json(run_path / "client_training_histories.json") or []
-    rounds_available = sorted({int(item["round"]) for item in histories})
-    if rounds_available:
-        selected_round = st.select_slider("Inspect local client histories", options=rounds_available,
-                                          value=rounds_available[-1], key="phase2_history_round")
-        local_rows = []
-        for item in histories:
-            if int(item["round"]) == selected_round:
-                last_epoch = {key: values[-1] for key, values in item.get("epoch_history", {}).items() if values}
-                local_rows.append({"Round": selected_round, "Client": item["client_id"],
-                                   "Samples": item["sample_count"], **last_epoch})
-        st.dataframe(pd.DataFrame(local_rows), use_container_width=True, hide_index=True)
+    with st.expander("Local client training histories"):
+        histories = load_json(run_path / "client_training_histories.json") or []
+        rounds_available = sorted({int(item["round"]) for item in histories})
+        if rounds_available:
+            selected_round = st.select_slider("Federated round", options=rounds_available,
+                                              value=rounds_available[-1], key="phase2_history_round")
+            local_rows = []
+            for item in histories:
+                if int(item["round"]) == selected_round:
+                    last_epoch = {key: values[-1] for key, values in item.get("epoch_history", {}).items() if values}
+                    local_rows.append({"Round": selected_round, "Client": item["client_id"],
+                                       "Samples": item["sample_count"], **last_epoch})
+            st.dataframe(pd.DataFrame(local_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Global model evaluation")
     st.dataframe(pd.DataFrame([
@@ -1036,20 +1067,19 @@ def render_phase2_authoritative() -> None:
         {"Modality": "Fingerprint", "Correct / test rows": f"{finger.get('correct', 0)} / {finger.get('samples', 0)}",
          "Classes": finger.get("classes"), "Accuracy": percent(finger.get("accuracy", 0))},
     ]), use_container_width=True, hide_index=True)
-    st.json(verification, expanded=False)
-
-    st.subheader("Persisted Phase 2 artifact hashes")
-    artifact_rows = []
-    for artifact in run_manifest.get("artifacts", []):
-        path = run_path / artifact["path"]
-        try:
-            info = path.stat()
-            actual = cached_sha256(str(path), info.st_mtime_ns, info.st_size)
-            status = "PASS" if actual == artifact.get("sha256") and info.st_size == artifact.get("bytes") else "FAIL"
-        except OSError:
-            status = "FAIL"
-        artifact_rows.append({**artifact, "current_hash_check": status})
-    st.dataframe(pd.DataFrame(artifact_rows), use_container_width=True, hide_index=True)
+    with st.expander("Evidence integrity and verification"):
+        st.json(verification, expanded=False)
+        artifact_rows = []
+        for artifact in run_manifest.get("artifacts", []):
+            path = run_path / artifact["path"]
+            try:
+                info = path.stat()
+                actual = cached_sha256(str(path), info.st_mtime_ns, info.st_size)
+                status = "PASS" if actual == artifact.get("sha256") and info.st_size == artifact.get("bytes") else "FAIL"
+            except OSError:
+                status = "FAIL"
+            artifact_rows.append({"Artifact": artifact["path"], "Current check": status})
+        st.dataframe(pd.DataFrame(artifact_rows), use_container_width=True, hide_index=True)
 
 
 manifest, manifest_path = current_manifest()
@@ -1058,34 +1088,35 @@ records, _registry_path = registry_for(run_dir, manifest)
 done = completed_phases(records)
 
 with st.sidebar:
-    st.markdown("<div style='padding:.5rem 0 1rem'><div style='font-size:1.25rem;font-weight:800'>DO-FMBS</div><div style='font-size:.8rem;color:#c5d9e2'>Simulation & evidence workspace</div></div>", unsafe_allow_html=True)
-    if manifest:
-        st.caption(f"Evidence: {manifest['replay_id']}")
-    elif run_dir:
-        st.caption(f"Active: {run_dir.name}")
-    else:
-        st.caption("No active simulation")
-    st.progress(len(done) / 6, text=f"{len(done)} / 6 phases")
-    for phase in PHASES:
-        number = phase["number"]
-        marker = "✓" if number in done else ("▶" if number == (len(done) + 1) else "·")
-        st.caption(f"{marker}  Phase {number} — {phase['name']}")
-    st.divider()
-    st.radio("Navigate the workflow", PAGE_OPTIONS, key="selected_page", label_visibility="collapsed")
-    st.divider()
+    if st.session_state.get("selected_page") not in PAGE_OPTIONS:
+        st.session_state.pop("selected_page", None)
+    if st.session_state.get("diagnostic_page") not in DIAGNOSTIC_OPTIONS:
+        st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
+    st.markdown("<div style='padding:.4rem 0 1rem'><div style='font-size:1.2rem;font-weight:800'>DO-FMBS</div><div style='font-size:.82rem;color:#c5d9e2'>Federated biometric research</div></div>", unsafe_allow_html=True)
     if run_dir:
-        st.caption("New simulations run in isolated folders; the accepted evidence manifest stays intact until you select a completed replay.")
-        st.button("Start another replay", use_container_width=True, on_click=start_new_replay)
+        st.caption(f"Interactive run · {run_dir.name}")
+        st.progress(len(done) / 6, text=f"Workflow · {len(done)} of 6 phases")
     elif manifest:
-        st.button("Start a new simulation", use_container_width=True, on_click=start_new_replay)
-    st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:1rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
+        st.caption(f"Interactive run · {manifest.get('replay_id', 'completed')}")
+        st.progress(len(done) / 6, text=f"Workflow · {len(done)} of 6 phases")
+    else:
+        st.caption("Saved results are available in Cross-Phase Analysis.")
+    st.radio("Research navigation", PAGE_OPTIONS, key="selected_page",
+             on_change=clear_diagnostic_page, label_visibility="visible")
+    st.button("Start Simulation", type="primary", use_container_width=True,
+              on_click=start_new_replay)
+    with st.expander("Interactive workflow & diagnostics", expanded=False):
+        st.selectbox("Run or inspect a phase", DIAGNOSTIC_OPTIONS,
+                     key="diagnostic_page", label_visibility="visible")
+        st.caption("Execution records and technical logs are separate from accepted phase results.")
+    st.markdown("<div style='font-size:.76rem;color:#c5d9e2;padding-top:.8rem'>Lydiah Moraa Machora<br>JOOUST · Master's research</div>", unsafe_allow_html=True)
 
-selected_page = st.session_state.get("selected_page", "Overview")
-if selected_page not in PAGE_OPTIONS:
-    selected_page = "Overview"
-    st.session_state["selected_page"] = selected_page
+diagnostic_page = st.session_state.get("diagnostic_page", DIAGNOSTIC_OPTIONS[0])
+selected_page = diagnostic_page if diagnostic_page != DIAGNOSTIC_OPTIONS[0] else st.session_state.get("selected_page", "Overview")
 if selected_page == "Overview":
     render_overview(manifest, records, run_dir)
+elif selected_page == RESEARCH_SCOPE_PAGE:
+    render_research_scope()
 elif selected_page == "Evidence & provenance":
     render_evidence(manifest, records, manifest_path)
 elif selected_page == RESEARCH_COMPARISON_PAGE:
@@ -1103,5 +1134,6 @@ elif selected_page == PHASE5_AUTHORITATIVE_PAGE:
 elif selected_page == PHASE6_AUTHORITATIVE_PAGE:
     render_phase6_authoritative(RUN_ROOT)
 else:
-    phase = next(item for item in PHASES if item["page"] == selected_page)
-    render_phase_page(phase, manifest, run_dir, records, done)
+    if selected_page in {phase["page"] for phase in PHASES}:
+        phase = next(item for item in PHASES if item["page"] == selected_page)
+        render_phase_page(phase, manifest, run_dir, records, done)

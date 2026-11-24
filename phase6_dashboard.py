@@ -25,15 +25,15 @@ def _sha(path: Path) -> str:
 
 
 def render_phase6_authoritative(run_root: Path) -> None:
-    st.title("Phase 6 · Dynamic Optimization (Authoritative)")
-    st.caption("Final research phase · persisted model-fit and controller evidence only; this page never regenerates the simulation.")
+    st.title("Phase 6 · Dynamic optimization")
+    st.caption("Constrained response-model fit and twelve-round defense/participation schedule.")
     runs = sorted((path for path in run_root.glob("phase6_authoritative_*")
                    if (path / "phase6_manifest.json").is_file()),
                   key=lambda path: path.stat().st_mtime, reverse=True)
     if not runs:
-        st.info("No authoritative Phase 6 run is available yet. Start phase6_authoritative_optimization.py to create a fresh isolated run.")
+        st.info("No saved Phase 6 optimization run is available yet.")
         return
-    name = st.selectbox("Saved Phase 6 run", [path.name for path in runs], key="phase6_authoritative_run")
+    name = st.selectbox("Optimization run", [path.name for path in runs], key="phase6_authoritative_run")
     run = run_root / name
     config = _json(run / "phase6_config.json")
     fit = _json(run / "model_fit.json")
@@ -55,11 +55,9 @@ def render_phase6_authoritative(run_root: Path) -> None:
                      "Current SHA-256 check": "PASS" if good else "FAIL"})
         if not good:
             bad.append(artifact["path"])
-    if report.get("status") == "PASS" and not bad and len(rows) >= 12:
-        st.success(f"Independent verification PASS · {report.get('check_count')} checks · manifest PASS · `{name}`")
-    else:
-        st.error(f"Evidence integrity needs attention · verifier={report.get('status', 'missing')} · invalid artifacts={len(bad)}")
-    st.caption(f"Authoritative Chapter Four SHA-256: `{config.get('source_document_sha256')}` · seed {config.get('seed')} · {fit.get('observations')} controlled synthetic observations")
+    if report.get("status") != "PASS" or bad or len(rows) < 12:
+        st.error("The saved optimization evidence needs review before interpretation.")
+    st.caption(f"Run `{name}` · seed {config.get('seed')} · {fit.get('observations')} controlled observations")
 
     st.subheader("Fitted dynamic response model")
     st.latex(r"\hat{Y}_{t+1}=\beta_0+\beta_{AI}AI_t+\beta_{PA}PA_t+\beta_{DM}DM_t+\beta_{GS}GS_t")
@@ -79,7 +77,7 @@ def render_phase6_authoritative(run_root: Path) -> None:
                  "VIF": fit["vifs"], "Shapiro-Wilk W / p": [fit["shapiro_w"], fit["shapiro_p"]],
                  "Durbin-Watson": fit["durbin_watson"], "CV R² SD": fit["cross_validation_r2_std"],
                  "CV RMSE": fit["cross_validation_rmse_mean"], "inference basis": fit["inference_basis"]}, expanded=True)
-    st.info("The 700-row model-derived simulation tests coefficient recovery; predicted Y is not measured real-world efficiency and was not fitted from the Phase 5 biometric metrics.")
+    st.caption("The response is model-derived from controlled simulation observations; it is not a measured deployment outcome.")
 
     st.subheader("Controller search and objective")
     a, b, c = st.columns(3)
@@ -87,40 +85,46 @@ def render_phase6_authoritative(run_root: Path) -> None:
     b.metric("Candidate evaluations", str(metrics["schedule_summary"]["total_candidate_evaluations"]))
     c.metric("Rounds", str(metrics["schedule_summary"]["rounds"]))
     st.code(config["cost_formula"], language="text")
-    st.caption("The controller first chooses the minimum-cost candidate with predicted Y ≥ 0.70; if none exists, it chooses the minimum-cost candidate with Y ≥ 0.60. Otherwise it reports the maximum-response diagnostic and rejects/defer; it is never counted as an accepted policy.")
+    st.caption("The controller minimizes cost subject to the response targets (0.70, then 0.60) and client-count/domain constraints. If no candidate qualifies, the round is deferred.")
 
     try:
         schedule = pd.read_csv(run / "dynamic_schedule_detailed.csv")
         candidates = pd.read_csv(run / "candidate_policy_search.csv")
     except (OSError, ValueError) as error:
-        st.error(f"Could not load saved controller artifacts: {error}")
+        st.error("Controller schedule data could not be loaded.")
+        with st.expander("Technical details"):
+            st.code(str(error))
         return
     st.subheader("Prescribed twelve-round policy schedule")
     display = schedule[["round", "epsilon", "AI", "PA", "previous_DM", "previous_GS", "DM", "K", "GS",
                         "predicted_Y", "defense_cost", "participation_cost", "defense_switch_cost",
                         "participation_switch_cost", "total_cost", "status", "deployment_decision"]]
     st.dataframe(display, width="stretch", hide_index=True)
-    plot = schedule.set_index("round")[["AI", "PA", "DM", "GS", "predicted_Y"]]
-    st.line_chart(plot)
+    plot_left, plot_right = st.columns(2)
+    plot_left.line_chart(schedule, x="round", y=["AI", "PA"],
+                         x_label="Federated round", y_label="Threat state", height=300)
+    plot_right.line_chart(schedule, x="round", y=["DM", "GS"],
+                          x_label="Federated round", y_label="Control setting", height=300)
+    st.line_chart(schedule, x="round", y="predicted_Y", x_label="Federated round",
+                  y_label="Predicted response Y", color="#167d83", height=280)
     round_number = st.selectbox("Inspect all candidates in a round", list(range(1, 13)), key="phase6_candidate_round")
     with st.expander(f"Round {round_number}: all 63 candidate policies", expanded=False):
         st.dataframe(candidates[candidates["round"] == round_number], width="stretch", hide_index=True)
 
-    st.subheader("Safety and domain tests")
     safety = _json(run / "phase6_safety_tests.json")
-    branch_rows = [{"Test": label.replace("_", " ").title(), "Passed": passed}
-                   for label, passed in safety.get("branch_results", {}).items()]
-    st.dataframe(pd.DataFrame(branch_rows), width="stretch", hide_index=True)
-    st.caption("The critical in-domain scenario and the out-of-domain scenario are separate rejection tests, not successful schedule decisions.")
-    st.write("Accepted boundary cases")
-    st.dataframe(pd.DataFrame(safety.get("valid_boundary_inputs", [])), width="stretch", hide_index=True)
-    st.write("Rejected invalid/non-finite inputs")
-    st.dataframe(pd.DataFrame(safety.get("invalid_inputs_rejected", [])), width="stretch", hide_index=True)
-
-    st.subheader("Phase 5 evidence linked as context")
-    st.json(_json(run / "phase5_context.json"), expanded=False)
-    st.caption("Phase 5 recognition, verification and attack metrics are context only. They are not treated as observations of simulated Y or as proof of live deployment behavior.")
-    st.subheader("Artifact integrity and independent verifier")
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    st.json(report, expanded=False)
-    st.warning("This is a controlled simulation and decision-policy demonstration. It does not guarantee biometric security, formal privacy, or safe operation in a live federation.")
+    with st.expander("Constraint, domain, and safety checks"):
+        branch_rows = [{"Scenario": label.replace("_", " ").title(), "Passed": passed}
+                       for label, passed in safety.get("branch_results", {}).items()]
+        st.dataframe(pd.DataFrame(branch_rows), width="stretch", hide_index=True)
+        st.caption("Critical in-domain and out-of-domain cases are evaluated as rejection conditions.")
+        st.write("Boundary inputs")
+        st.dataframe(pd.DataFrame(safety.get("valid_boundary_inputs", [])), width="stretch", hide_index=True)
+        st.write("Rejected invalid inputs")
+        st.dataframe(pd.DataFrame(safety.get("invalid_inputs_rejected", [])), width="stretch", hide_index=True)
+    with st.expander("Phase 5 context"):
+        st.json(_json(run / "phase5_context.json"), expanded=False)
+        st.caption("Phase 5 measures are contextual inputs; they are not observations of the simulated response variable.")
+    with st.expander("Evidence integrity and verification"):
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.json(report, expanded=False)
+        st.caption(f"Chapter Four source SHA-256: `{config.get('source_document_sha256')}`")

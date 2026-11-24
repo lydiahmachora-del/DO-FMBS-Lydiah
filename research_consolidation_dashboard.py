@@ -102,16 +102,16 @@ def _metric_rows(data: dict[int, dict]) -> list[dict]:
 
 
 def render_research_consolidation(run_root: Path, report_path: Path) -> None:
-    st.title("DO-FMBS · Research simulation and comparison")
-    st.caption("A read-only, evidence-led view across the six accepted phase runs. Historical models and metrics are loaded from disk; this page does not train or alter them.")
+    st.title("Cross-Phase Analysis")
+    st.caption("Compare the saved results from the six research phases, including training convergence, validation, and optimization outcomes.")
     evidence, audit_rows = inspect_accepted_runs(run_root)
     integrity = all(item["integrity_ok"] for item in evidence.values())
     if integrity:
-        st.success("All six accepted phase runs pass their recorded independent verification and current manifest SHA-256 checks.")
+        st.caption("All six accepted runs match their recorded verification reports and artifact manifests.")
     else:
         failed = [f"Phase {phase}" for phase, item in evidence.items() if not item["integrity_ok"]]
         st.error("Evidence check failed for " + ", ".join(failed) + ". Do not use affected values as verified results.")
-    st.info("Demo mode = browse and compare these persisted results. To execute a fresh simulation, use **Start a new simulation** in the sidebar; it creates an isolated replay and leaves accepted evidence intact.")
+    st.caption("These comparisons use the saved accepted runs. Start Simulation creates a separate interactive replay.")
 
     summary = _metric_rows(evidence)
     st.subheader("Six-phase research workflow")
@@ -124,13 +124,18 @@ def render_research_consolidation(run_root: Path, report_path: Path) -> None:
         rounds = pd.DataFrame()
         st.warning(f"Could not read persisted federated round history: {error}")
     if not rounds.empty:
-        st.subheader("Federated training · saved round values")
-        st.caption("Test metrics are plotted by federated round. These are checkpoint evaluations, not independent test sets per round.")
+        st.subheader("Federated training convergence")
+        st.caption("Per-round checkpoint evaluation on the fixed test partitions; the same test records are used at each round.")
         left, right = st.columns(2)
-        left.line_chart(rounds.set_index("round")[["test_face_output_accuracy", "test_finger_output_accuracy"]])
-        right.line_chart(rounds.set_index("round")[["test_face_output_loss", "test_finger_output_loss"]])
-        st.dataframe(rounds[["round", "test_face_output_accuracy", "test_finger_output_accuracy", "test_face_output_loss", "test_finger_output_loss"]], width="stretch", hide_index=True)
-        st.download_button("Download Phase 2 round values (CSV)", rounds.to_csv(index=False).encode("utf-8"), "phase2_round_metrics.csv", "text/csv")
+        accuracy = rounds.copy()
+        accuracy[["test_face_output_accuracy", "test_finger_output_accuracy"]] *= 100
+        left.line_chart(accuracy, x="round", y=["test_face_output_accuracy", "test_finger_output_accuracy"],
+                        x_label="Federated round", y_label="Accuracy (%)", color=["#285875", "#167d83"])
+        right.line_chart(rounds, x="round", y=["test_face_output_loss", "test_finger_output_loss"],
+                         x_label="Federated round", y_label="Cross-entropy loss", color=["#285875", "#167d83"])
+        with st.expander("Round values and download"):
+            st.dataframe(rounds[["round", "test_face_output_accuracy", "test_finger_output_accuracy", "test_face_output_loss", "test_finger_output_loss"]], width="stretch", hide_index=True)
+            st.download_button("Download Phase 2 round values (CSV)", rounds.to_csv(index=False).encode("utf-8"), "phase2_round_metrics.csv", "text/csv")
 
     st.subheader("Validation comparison · Phase 5")
     p5 = evidence[5]["metrics"]
@@ -144,9 +149,7 @@ def render_research_consolidation(run_root: Path, report_path: Path) -> None:
     stats = p5.get("statistical_comparisons", {})
     st.caption(f"Paired identity-cluster test: face Δ={stats.get('face', {}).get('difference_percentage_points', float('nan')):+.2f} pp (p={stats.get('face', {}).get('p_value', float('nan')):.5f}); fingerprint Δ={stats.get('fingerprint', {}).get('difference_percentage_points', float('nan')):+.2f} pp (p={stats.get('fingerprint', {}).get('p_value', float('nan')):.5f}).")
 
-    st.subheader("Run provenance and integrity")
-    st.dataframe(pd.DataFrame(audit_rows), width="stretch", hide_index=True)
-    st.download_button("Download six-phase evidence summary (CSV)", pd.DataFrame(summary).to_csv(index=False).encode("utf-8"), "dofmbs_six_phase_summary.csv", "text/csv")
+    st.download_button("Download six-phase summary (CSV)", pd.DataFrame(summary).to_csv(index=False).encode("utf-8"), "dofmbs_six_phase_summary.csv", "text/csv")
     package = {
         "title": "DO-FMBS accepted six-phase evidence index",
         "interpretation": "Values are read from accepted phase-specific runs; see the report for scope and limitations.",
@@ -159,5 +162,6 @@ def render_research_consolidation(run_root: Path, report_path: Path) -> None:
     }
     st.download_button("Download evidence index (JSON)", json.dumps(package, indent=2, allow_nan=False).encode("utf-8"), "dofmbs_six_phase_evidence.json", "application/json")
     if report_path.is_file():
-        st.download_button("Download final research report (Markdown)", report_path.read_bytes(), report_path.name, "text/markdown")
-    st.warning("Scope: the fingerprint branch uses generated synthetic identities; face/fingerprint labels are independent populations; adversarial robustness is face-only; gradient noise is not a formal differential-privacy guarantee; Phase 6 is a controlled model-derived simulation, not deployment evidence.")
+        st.download_button("Download research report (Markdown)", report_path.read_bytes(), report_path.name, "text/markdown")
+    with st.expander("Run provenance and artifact integrity"):
+        st.dataframe(pd.DataFrame(audit_rows), width="stretch", hide_index=True)
