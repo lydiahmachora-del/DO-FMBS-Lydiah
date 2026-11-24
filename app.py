@@ -29,6 +29,7 @@ RUNNER = ROOT / "run_interactive_pipeline.py"
 AUDITOR = ROOT / "scripts" / "verify_replay_evidence.py"
 MANIFEST_BUILDER = ROOT / "scripts" / "build_final_evidence_manifest.py"
 RUN_ROOT = ROOT / "runtime_recording"
+ACTIVE_RUN_PATH = RUN_ROOT / ".active_interactive_run"
 
 PHASES = [
     {
@@ -247,16 +248,28 @@ def percent(value: object, digits: int = 2) -> str:
 
 
 def selected_run_dir() -> Path | None:
-    raw = st.session_state.get("active_run_dir")
-    if not raw:
-        return None
-    candidate = Path(raw).resolve()
-    try:
-        candidate.relative_to(RUN_ROOT.resolve())
-    except ValueError:
-        st.session_state.pop("active_run_dir", None)
-        return None
-    return candidate
+    candidates = [st.session_state.get("active_run_dir")]
+    if ACTIVE_RUN_PATH.is_file():
+        try:
+            persisted = ACTIVE_RUN_PATH.read_text(encoding="utf-8").strip()
+            if persisted:
+                candidates.append(persisted)
+        except OSError:
+            pass
+    for raw in candidates:
+        if not raw:
+            continue
+        raw_path = Path(raw)
+        candidate = (raw_path if raw_path.is_absolute() else RUN_ROOT / raw_path).resolve()
+        try:
+            candidate.relative_to(RUN_ROOT.resolve())
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            st.session_state["active_run_dir"] = str(candidate)
+            return candidate
+    st.session_state.pop("active_run_dir", None)
+    return None
 
 
 def current_manifest() -> tuple[dict | None, Path | None]:
@@ -363,6 +376,8 @@ def start_new_replay() -> Path:
         run_dir = RUN_ROOT / f"interactive_replay_{stamp}_{suffix}"
         suffix += 1
     run_dir.mkdir(parents=True, exist_ok=False)
+    ACTIVE_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVE_RUN_PATH.write_text(run_dir.name, encoding="utf-8")
     st.session_state["active_run_dir"] = str(run_dir)
     st.session_state["selected_page"] = SIMULATION_PAGE
     st.session_state["diagnostic_page"] = DIAGNOSTIC_OPTIONS[0]
@@ -873,7 +888,11 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
 
     phase_is_next = number == 1 or all(index in completed for index in range(1, number))
     if run_dir is None:
-        st.info("Start a new interactive run from the Simulation page to execute phases in sequence.")
+        if number == 1:
+            st.info("No fresh interactive run is active. Start a new run from Simulation, then trigger Phase 1 to begin.")
+        else:
+            required = ", ".join(f"Phase {index}" for index in range(1, number))
+            st.info(f"No fresh interactive run is active. Start a new run from Simulation, then complete {required} in order before Phase {number}.")
     elif phase_is_next:
         if done:
             st.success(f"Phase {number} completed in run `{run_dir.name}`.")
@@ -888,7 +907,7 @@ def render_phase_page(phase: dict, manifest: dict | None, run_dir: Path | None,
                 finalize_replay(run_dir)
     else:
         waiting_for = next((index for index in range(1, number) if index not in completed), None)
-        st.info(f"Complete Phase {waiting_for} before running this phase.")
+        st.info(f"Trigger and complete Phase {waiting_for} in this run before running Phase {number}.")
 
     if record:
         st.caption(f"Last run: {record.get('start_timestamp', 'time unavailable')} · {float(record.get('elapsed_seconds', 0)):.1f} sec · exit {record.get('exit_code')}")
